@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Penwick — a beautiful writing app for Mac</title>
+<meta name="description" content="Penwick is a native macOS writing app for books and screenplays. Real paginated pages, rich text, themes, a character name generator, version history, iCloud collaboration, and export to PDF, DOCX, Fountain and more. Free and open source.">
+<meta property="og:title" content="Penwick — a beautiful writing app for Mac">
+<meta property="og:description" content="Real pages. Rich text. Themes. Name generator. Version history. Free & open source.">
+<style>
+  :root{
+    --bg:#0d0c1a; --bg2:#15132a; --card:#1b1933; --card2:#211f3d;
+    --line:rgba(255,255,255,.08); --tx:#ECEAF6; --mut:#A09CC4; --dim:#6f6b96;
+    --accent:#7c6cff; --accent2:#b06cff; --white:#fff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;background:var(--bg);color:var(--tx);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 24px}
+  .serif{font-family:"New York","Times New Roman",Georgia,serif}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(14px);background:rgba(13,12,26,.7);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:62px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:17px}
+  .mark{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:21px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 6px 18px rgba(124,108,255,.45)}
+  .navlinks{display:flex;gap:26px;align-items:center;color:var(--mut);font-size:14px}
+  .navlinks a:hover{color:var(--tx)}
+  .btn{display:inline-flex;align-items:center;gap:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;
+    padding:11px 20px;border-radius:11px;font-weight:600;font-size:14px;border:none;cursor:pointer;transition:transform .15s,box-shadow .15s;box-shadow:0 8px 24px rgba(124,108,255,.4)}
+  .btn:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(124,108,255,.55)}
+  .btn.ghost{background:transparent;border:1px solid var(--line);box-shadow:none;color:var(--tx)}
+  .btn.ghost:hover{background:var(--card);transform:translateY(-2px)}
+
+  /* hero */
+  header{position:relative;text-align:center;padding:96px 0 60px}
+  .glow{position:absolute;top:-160px;left:50%;transform:translateX(-50%);width:760px;height:520px;border-radius:50%;
+    background:radial-gradient(closest-side,rgba(124,108,255,.30),transparent);filter:blur(20px);pointer-events:none}
+  .bigmark{width:110px;height:110px;border-radius:28px;margin:0 auto 26px;display:grid;place-items:center;color:#fff;font-size:64px;font-weight:700;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 22px 60px rgba(124,108,255,.5)}
+  header h1{font-size:60px;line-height:1.05;font-weight:700;letter-spacing:-1.5px;margin-bottom:18px}
+  header h1 .grad{background:linear-gradient(120deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  header p.sub{font-size:20px;color:var(--mut);max-width:600px;margin:0 auto 14px}
+  .quote{font-style:italic;color:var(--dim);font-size:14px;margin-bottom:34px}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .meta{margin-top:18px;color:var(--dim);font-size:13px}
+
+  /* window mockup */
+  .shot{max-width:920px;margin:64px auto 0;border-radius:16px;overflow:hidden;border:1px solid var(--line);
+    box-shadow:0 40px 100px rgba(0,0,0,.6);background:var(--bg2)}
+  .titlebar{display:flex;align-items:center;gap:8px;padding:12px 16px;background:#100f22;border-bottom:1px solid var(--line)}
+  .dot{width:12px;height:12px;border-radius:50%}
+  .dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+  .titlebar .ttl{margin-left:12px;color:var(--dim);font-size:12px}
+  .appbody{display:grid;grid-template-columns:200px 1fr;min-height:330px}
+  .side{background:#13122a;border-right:1px solid var(--line);padding:16px 14px}
+  .side .lbl{color:var(--dim);font-size:10px;letter-spacing:1px;font-weight:700;margin:6px 0 10px}
+  .side .row{display:flex;align-items:center;gap:8px;padding:8px 9px;border-radius:8px;color:var(--mut);font-size:13px;margin-bottom:4px}
+  .side .row.on{background:rgba(124,108,255,.16);color:var(--tx)}
+  .side .row .ic{width:14px;height:14px;border-radius:4px;background:linear-gradient(135deg,var(--accent),var(--accent2));flex:none}
+  .canvas{background:#1a1832;padding:30px;display:flex;justify-content:center}
+  .page{width:100%;max-width:440px;background:#fff;border-radius:8px;box-shadow:0 18px 40px rgba(0,0,0,.45);padding:38px 40px;color:#1a1a1a;position:relative}
+  .page h3{font-size:19px;margin-bottom:12px;color:#15132a}
+  .page p{font-size:12.5px;color:#444;line-height:1.7;margin-bottom:9px}
+  .page .pnum{position:absolute;bottom:12px;left:0;right:0;text-align:center;color:#9a9a9a;font-size:11px}
+
+  /* sections */
+  section{padding:84px 0}
+  .eyebrow{color:var(--accent);font-weight:700;font-size:12px;letter-spacing:2px;text-transform:uppercase;text-align:center;margin-bottom:12px}
+  h2{font-size:38px;font-weight:700;text-align:center;letter-spacing:-.8px;margin-bottom:14px}
+  .lead{color:var(--mut);text-align:center;max-width:620px;margin:0 auto 52px;font-size:17px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  .feat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;transition:transform .15s,border-color .15s}
+  .feat:hover{transform:translateY(-4px);border-color:rgba(124,108,255,.4)}
+  .feat .fi{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;margin-bottom:14px;background:rgba(124,108,255,.16)}
+  .feat .fi svg{width:22px;height:22px;stroke:var(--accent2);fill:none;stroke-width:1.8}
+  .feat h4{font-size:16px;margin-bottom:6px}
+  .feat p{color:var(--mut);font-size:13.5px}
+
+  .themes{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:8px}
+  .swatch{width:46px;height:46px;border-radius:12px;border:1px solid var(--line)}
+
+  /* trust */
+  .trust{background:linear-gradient(180deg,var(--bg2),var(--bg));border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  .trustcard{max-width:760px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:34px}
+  .trustcard h3{font-size:22px;margin-bottom:8px;display:flex;align-items:center;gap:10px}
+  .trustcard p{color:var(--mut);font-size:15px;margin-bottom:14px}
+  .trustcard .pill{display:inline-flex;align-items:center;gap:7px;background:rgba(124,108,255,.14);color:#cfc7ff;padding:6px 13px;border-radius:20px;font-size:12.5px;margin:3px 6px 3px 0}
+
+  /* install */
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:10px}
+  .step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+  .step .n{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;display:grid;place-items:center;font-weight:700;font-size:14px;margin-bottom:12px}
+  .step h4{font-size:15px;margin-bottom:5px}
+  .step p{color:var(--mut);font-size:13px}
+  code{background:#000;padding:2px 7px;border-radius:5px;font-size:12.5px;color:#cfc7ff;font-family:"SF Mono",ui-monospace,monospace}
+
+  .final{text-align:center}
+  footer{border-top:1px solid var(--line);padding:34px 0;text-align:center;color:var(--dim);font-size:13px}
+  footer a{color:var(--mut)} footer a:hover{color:var(--tx)}
+
+  @media(max-width:820px){
+    header h1{font-size:40px}.grid,.steps{grid-template-columns:1fr}.appbody{grid-template-columns:1fr}.side{display:none}
+    .navlinks a:not(.btn){display:none}
+  }
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <div class="brand"><div class="mark serif">&amp;</div> Penwick</div>
+  <div class="navlinks">
+    <a href="#features">Features</a>
+    <a href="#trust">Is it safe?</a>
+    <a href="#install">Install</a>
+    <a class="btn" href="#download">Download</a>
+  </div>
+</div></nav>
+
+<header>
+  <div class="glow"></div>
+  <div class="wrap">
+    <div class="bigmark serif">&amp;</div>
+    <h1>Write your book.<br><span class="grad">Beautifully.</span></h1>
+    <p class="sub">Penwick is a native macOS app for writing books and screenplays — with real, paginated pages that feel like paper.</p>
+    <p class="quote">“A word after a word after a word is power.” — Margaret Atwood</p>
+    <div class="cta">
+      <a class="btn" href="#download">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+        Download for Mac
+      </a>
+      <a class="btn ghost" href="https://github.com/loaffywoffy/penwick" target="_blank">View source on GitHub</a>
+    </div>
+    <p class="meta">Free &amp; open source · macOS 14+ · Apple Silicon</p>
+  </div>
+
+  <!-- app mockup -->
+  <div class="wrap"><div class="shot">
+    <div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="ttl">Penwick — The Silent Harbor</span></div>
+    <div class="appbody">
+      <div class="side">
+        <div class="lbl">MANUSCRIPT</div>
+        <div class="row on"><span class="ic"></span> Chapter One</div>
+        <div class="row"><span class="ic"></span> Chapter Two</div>
+        <div class="row"><span class="ic"></span> Chapter Three</div>
+        <div class="lbl" style="margin-top:18px">PROJECT 2</div>
+        <div class="row"><span class="ic"></span> Short Stories</div>
+      </div>
+      <div class="canvas"><div class="page">
+        <h3 class="serif">Chapter One</h3>
+        <p>The harbor was quiet that morning, the kind of quiet that settles only after a storm has spent itself against the rocks.</p>
+        <p>She had come back for one reason, and she meant to leave before anyone noticed the boat was gone.</p>
+        <p>But the tide, as always, had its own plans.</p>
+        <div class="pnum serif">1</div>
+      </div></div>
+    </div>
+  </div></div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="eyebrow">Everything you need</div>
+    <h2>A full writing studio</h2>
+    <p class="lead">Not a notes app pretending to be a manuscript. Penwick is built for long-form work, from first line to final export.</p>
+    <div class="grid">
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></div><h4>Real paginated pages</h4><p>Your words flow across separate page-sized sheets, just like Word or Pages — add pages as you write.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></svg></div><h4>Rich text, done right</h4><p>Every system font in its own typeface, sizes, bold/italic/underline, colour, alignment, lists, and full undo.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h4>Version history</h4><p>Penwick auto-snapshots your drafts as you go. Roll back to any earlier version, anytime.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><path d="M16 11a4 4 0 10-8 0M4 20a8 8 0 0116 0"/></svg></div><h4>Character name generator</h4><p>Spin up gender-matched first names with surnames from real per-country databases.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg></div><h4>Live collaboration</h4><p>Write together through iCloud — see who's here and watch edits sync between people.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg></div><h4>Export anywhere</h4><p>PDF, DOCX, Markdown, RTF, plain text and Fountain — for editors, agents, or your screenplay tools.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 000 18z"/></svg></div><h4>Themes &amp; dark mode</h4><p>Seven colour themes plus light, dark and auto — make the page yours.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 00-2 2v3m13-5h3a2 2 0 012 2v3M8 21H5a2 2 0 01-2-2v-3m13 5h3a2 2 0 002-2v-3"/></svg></div><h4>Focus mode</h4><p>Hide everything but the page and write with nothing between you and the words.</p></div>
+      <div class="feat"><div class="fi"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7L21 8M21 3v5h-5"/></svg></div><h4>Auto-updates</h4><p>New versions install themselves straight from GitHub — you're always on the latest.</p></div>
+    </div>
+    <div class="themes" style="margin-top:34px">
+      <div class="swatch" style="background:#7c6cff"></div>
+      <div class="swatch" style="background:#e0853b"></div>
+      <div class="swatch" style="background:#3bbf8f"></div>
+      <div class="swatch" style="background:#d8527c"></div>
+      <div class="swatch" style="background:#4a8fe0"></div>
+      <div class="swatch" style="background:#c0a02e"></div>
+      <div class="swatch" style="background:#8a6cff"></div>
+    </div>
+  </div>
+</section>
+
+<section id="trust" class="trust">
+  <div class="wrap">
+    <div class="trustcard">
+      <h3>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#b06cff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Is it a virus? No. Here's the honest truth.
+      </h3>
+      <p>When you first open Penwick, macOS may warn you that it's from an "unidentified developer." That is <strong>not</strong> because anything is wrong with it — it's because I haven't paid Apple's <strong>$99/year Developer Program</strong> fee to code-sign the app. I'm one person building this for fun, and I genuinely can't justify $99 a year just to remove a scary dialog.</p>
+      <p>So instead of asking you to trust me, I'm showing you everything. <strong>Penwick is fully open source.</strong> Every single line of code is public — read it, build it yourself, audit it for anything sketchy. There's no telemetry, no analytics, no accounts, no servers. Your writing lives in your own iCloud Drive as plain <code>.rtf</code> files.</p>
+      <p style="margin-bottom:18px">
+        <span class="pill">No tracking</span>
+        <span class="pill">No ads</span>
+        <span class="pill">No sign-up</span>
+        <span class="pill">Your files stay yours</span>
+        <span class="pill">100% open source</span>
+      </p>
+      <a class="btn" href="https://github.com/loaffywoffy/penwick" target="_blank">Read every line on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="eyebrow">Two minutes</div>
+    <h2>How to install</h2>
+    <p class="lead">Because the app isn't code-signed, macOS needs you to open it once the manual way. After that it just works — and updates itself.</p>
+    <div class="steps">
+      <div class="step"><div class="n">1</div><h4>Download &amp; unzip</h4><p>Grab the zip below and double-click it. Drag <strong>Penwick.app</strong> into your Applications folder.</p></div>
+      <div class="step"><div class="n">2</div><h4>Right-click → Open</h4><p>The first time only, <strong>right-click</strong> Penwick and choose <strong>Open</strong>, then click <strong>Open</strong> in the dialog.</p></div>
+      <div class="step"><div class="n">3</div><h4>Start writing</h4><p>That's it. Penwick keeps itself up to date from here — no need to come back to this page.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="download" class="final">
+  <div class="wrap">
+    <div class="bigmark serif" style="width:84px;height:84px;font-size:48px;border-radius:22px;margin-bottom:22px">&amp;</div>
+    <h2>Get Penwick</h2>
+    <p class="lead">Free, forever. Built for Apple Silicon Macs running macOS 14 or later.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/loaffywoffy/penwick-releases/raw/main/Penwick.app.zip">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+        Download Penwick
+      </a>
+      <a class="btn ghost" href="https://github.com/loaffywoffy/penwick" target="_blank">Source code</a>
+    </div>
+    <p class="meta">Latest release · auto-updates after first launch</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p class="serif" style="font-size:18px;color:var(--mut);margin-bottom:6px">&amp; Penwick</p>
+    <p>Made with care by an indie developer · Open source on
+      <a href="https://github.com/loaffywoffy/penwick" target="_blank">GitHub</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,6 @@
+build/
+release/
+*.zip
+.DS_Store
+/index.html
+script-features-picker.html
