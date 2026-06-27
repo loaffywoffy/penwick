@@ -70,7 +70,7 @@ enum Palette {
     ]
 
     static var current: Theme {
-        let name = UserDefaults.standard.string(forKey: "theme") ?? "Indigo"
+        let name = UserDefaults.standard.string(forKey: "theme") ?? "Ocean"
         return themes.first { $0.name == name } ?? themes[0]
     }
 
@@ -325,7 +325,7 @@ extension Notification.Name {
 struct SettingsView: View {
     @EnvironmentObject var store: PenwickStore
     @AppStorage("appearance") private var appearance = "auto"
-    @AppStorage("theme") private var theme = "Indigo"
+    @AppStorage("theme") private var theme = "Ocean"
     var onClose: () -> Void = {}
 
     var body: some View {
@@ -1332,9 +1332,59 @@ final class PageTextView: NSTextView {
         controller?.textView = self
         return super.becomeFirstResponder()
     }
+
+    // A distinctive caret: a touch wider and in the theme accent colour.
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        var r = rect; r.size.width = 2.4
+        super.drawInsertionPoint(in: r, color: Palette.accentNS(), turnedOn: flag)
+    }
+
+    // A custom, branded text cursor (an inked I-beam with an accent cap) instead of
+    // the stock system one — small detail that makes the app feel hand-made.
+    override func resetCursorRects() { addCursorRect(bounds, cursor: PageTextView.inkCursor) }
+    override func cursorUpdate(with event: NSEvent) { PageTextView.inkCursor.set() }
+
+    static let inkCursor: NSCursor = {
+        let w: CGFloat = 16, h: CGFloat = 28, mid = 8.0
+        let img = NSImage(size: NSSize(width: w, height: h))
+        img.lockFocus()
+        // soft white halo so it stays visible on the white page
+        NSColor.white.withAlphaComponent(0.92).setStroke()
+        let halo = NSBezierPath(); halo.lineWidth = 3.2; halo.lineCapStyle = .round
+        halo.move(to: NSPoint(x: mid, y: 4)); halo.line(to: NSPoint(x: mid, y: h - 7)); halo.stroke()
+        // the inked bar with serifs
+        NSColor(white: 0.12, alpha: 1).setStroke()
+        let bar = NSBezierPath(); bar.lineWidth = 1.6; bar.lineCapStyle = .round
+        bar.move(to: NSPoint(x: mid, y: 4)); bar.line(to: NSPoint(x: mid, y: h - 7))
+        bar.move(to: NSPoint(x: mid - 3, y: 4)); bar.line(to: NSPoint(x: mid + 3, y: 4))
+        bar.move(to: NSPoint(x: mid - 3, y: h - 7)); bar.line(to: NSPoint(x: mid + 3, y: h - 7))
+        bar.stroke()
+        // accent cap dot
+        Palette.accentNS().setFill()
+        NSBezierPath(ovalIn: NSRect(x: mid - 2.5, y: h - 6, width: 5, height: 5)).fill()
+        img.unlockFocus()
+        return NSCursor(image: img, hotSpot: NSPoint(x: mid, y: h / 2))
+    }()
 }
 
 final class PagesDocView: NSView { override var isFlipped: Bool { true } }
+
+// A signature scroll feel: trackpad keeps its natural momentum, but the mouse
+// wheel gets a snappier, faster glide so paging through a manuscript feels quick.
+final class PagesScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        if event.hasPreciseScrollingDeltas || event.phase != [] || event.momentumPhase != [] {
+            super.scrollWheel(with: event); return
+        }
+        let clip = contentView
+        var o = clip.bounds.origin
+        o.y -= event.scrollingDeltaY * 2.4
+        let maxY = max(0, (documentView?.frame.height ?? 0) - clip.bounds.height)
+        o.y = min(max(0, o.y), maxY)
+        clip.scroll(to: o)
+        reflectScrolledClipView(clip)
+    }
+}
 
 extension NSColor {
     convenience init?(hexString: String) {
@@ -1446,7 +1496,7 @@ struct RichTextEditor: NSViewRepresentable {
         c.textStorage = storage; c.layoutManager = lm
 
         let doc = PagesDocView()
-        let scroll = NSScrollView()
+        let scroll = PagesScrollView()
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.documentView = doc
@@ -1535,7 +1585,7 @@ struct RichTextEditor: NSViewRepresentable {
             tv.textContainerInset = .zero
             tv.defaultParagraphStyle = defaultParagraphStyle()
             tv.typingAttributes = [.font: bodyNSFont(), .foregroundColor: Coordinator.pageTextColor, .paragraphStyle: defaultParagraphStyle()]
-            tv.insertionPointColor = Coordinator.pageTextColor
+            tv.insertionPointColor = Palette.accentNS()
             tv.selectedTextAttributes = [.backgroundColor: NSColor.selectedTextBackgroundColor]
             let sheet = NSView(); sheet.wantsLayer = true; sheet.layer?.cornerRadius = 12
             sheet.shadow = { let s = NSShadow(); s.shadowColor = NSColor.black.withAlphaComponent(0.18); s.shadowBlurRadius = 18; s.shadowOffset = NSSize(width: 0, height: -5); return s }()
@@ -1770,7 +1820,7 @@ struct ContentView: View {
     @State private var newProjectName = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @AppStorage("appearance") private var appearance = "auto"
-    @AppStorage("theme") private var theme = "Indigo"
+    @AppStorage("theme") private var theme = "Ocean"
     @AppStorage("focusMode") private var focusMode = false
 
     private var scheme: ColorScheme? {
@@ -1928,7 +1978,7 @@ struct ContentView: View {
 
 struct Binder: View {
     @EnvironmentObject var store: PenwickStore
-    @AppStorage("theme") private var activeTheme = "Indigo"   // observe so accent repaints live
+    @AppStorage("theme") private var activeTheme = "Ocean"   // observe so accent repaints live
     @State private var collapsed: Set<URL> = []
     @State private var search = ""
     @State private var renameTarget: Project?
@@ -2207,7 +2257,7 @@ struct EditorView: View {
     @EnvironmentObject var store: PenwickStore
     @EnvironmentObject var editor: EditorController
     @Environment(\.colorScheme) var scheme
-    @AppStorage("theme") private var activeTheme = "Indigo"
+    @AppStorage("theme") private var activeTheme = "Ocean"
     @AppStorage("focusMode") private var focusMode = false
     let url: URL
 
@@ -2520,7 +2570,7 @@ enum CharacterGen {
 
 struct CharacterGeneratorView: View {
     @EnvironmentObject var editor: EditorController
-    @AppStorage("theme") private var activeTheme = "Indigo"
+    @AppStorage("theme") private var activeTheme = "Ocean"
     var onClose: () -> Void = {}
     @AppStorage("nameGen_gender") private var gender = "Any"
     @AppStorage("nameGen_nationality") private var nationality = "Any"
@@ -2595,7 +2645,7 @@ struct CharacterGeneratorView: View {
 struct CharacterCard: View {
     let character: Character
     @EnvironmentObject var editor: EditorController
-    @AppStorage("theme") private var activeTheme = "Indigo"
+    @AppStorage("theme") private var activeTheme = "Ocean"
     @State private var inserted = false
     @State private var copied = false
 
@@ -2636,7 +2686,7 @@ struct CharacterCard: View {
 struct HomeView: View {
     @EnvironmentObject var store: PenwickStore
     @Environment(\.colorScheme) var scheme
-    @AppStorage("theme") private var activeTheme = "Indigo"
+    @AppStorage("theme") private var activeTheme = "Ocean"
     @State private var quote = ""
 
     private let quotes = [

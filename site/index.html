@@ -11,10 +11,10 @@
 <meta property="og:image" content="icon.png">
 <style>
   :root{
-    --bg:#0c0b16; --bg2:#13122a; --card:#1b1933; --card2:#211f3d;
-    --line:rgba(255,255,255,.08); --tx:#ECEAF6; --mut:#A09CC4; --dim:#6f6b96;
-    --accent:#5c6bf2; --accent2:#7d6cf0; --accentd:#444fc2;
-    --surround:#17192a; --bar:#16142b;
+    --bg:#080c11; --bg2:#0e1420; --card:#121a26; --card2:#18222e;
+    --line:rgba(255,255,255,.08); --tx:#E8EFF6; --mut:#9cb4cc; --dim:#6b85a0;
+    --accent:#2185c7; --accent2:#4aa3e0; --accentd:#175a8a;
+    --surround:#121a26; --bar:#101622;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html{scroll-behavior:smooth}
@@ -31,15 +31,15 @@
   .navlinks{display:flex;gap:26px;align-items:center;color:var(--mut);font-size:14px}
   .navlinks a:hover{color:var(--tx)}
   .btn{display:inline-flex;align-items:center;gap:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;
-    padding:11px 20px;border-radius:11px;font-weight:600;font-size:14px;border:none;cursor:pointer;transition:transform .15s,box-shadow .15s;box-shadow:0 8px 24px rgba(92,107,242,.4)}
-  .btn:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(92,107,242,.55)}
+    padding:11px 20px;border-radius:11px;font-weight:600;font-size:14px;border:none;cursor:pointer;transition:transform .15s,box-shadow .15s;box-shadow:0 8px 24px rgba(33,133,199,.4)}
+  .btn:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(33,133,199,.55)}
   .btn.ghost{background:transparent;border:1px solid var(--line);box-shadow:none;color:var(--tx)}
   .btn.ghost:hover{background:var(--card);transform:translateY(-2px)}
 
   header{position:relative;text-align:center;padding:92px 0 50px}
   .glow{position:absolute;top:-160px;left:50%;transform:translateX(-50%);width:760px;height:520px;border-radius:50%;
-    background:radial-gradient(closest-side,rgba(92,107,242,.30),transparent);filter:blur(20px);pointer-events:none}
-  header img.hero{width:108px;height:108px;margin:0 auto 26px;box-shadow:0 22px 60px rgba(92,107,242,.5)}
+    background:radial-gradient(closest-side,rgba(33,133,199,.30),transparent);filter:blur(20px);pointer-events:none}
+  header img.hero{width:108px;height:108px;margin:0 auto 26px;box-shadow:0 22px 60px rgba(33,133,199,.5)}
   header h1{font-size:60px;line-height:1.05;font-weight:700;letter-spacing:-1.5px;margin-bottom:18px}
   header h1 .grad{background:linear-gradient(120deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
   header p.sub{font-size:20px;color:var(--mut);max-width:600px;margin:0 auto 14px}
@@ -51,25 +51,25 @@
   .shot{max-width:960px;margin:60px auto 0;border-radius:14px;overflow:hidden;border:1px solid var(--line);
     box-shadow:0 40px 100px rgba(0,0,0,.65);background:var(--bg2)}
   .ico{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
-  .titlebar{display:flex;align-items:center;gap:8px;padding:11px 15px;background:#0e0d1f;border-bottom:1px solid var(--line)}
+  .titlebar{display:flex;align-items:center;gap:8px;padding:11px 15px;background:#0c1119;border-bottom:1px solid var(--line)}
   .dot{width:12px;height:12px;border-radius:50%}
   .dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
   .titlebar .ttl{flex:1;text-align:center;color:var(--mut);font-size:12.5px;font-weight:500;margin-right:54px}
   /* window toolbar */
-  .toolbar{display:flex;align-items:center;gap:7px;padding:9px 14px;background:#100f22;border-bottom:1px solid var(--line);color:var(--mut)}
+  .toolbar{display:flex;align-items:center;gap:7px;padding:9px 14px;background:#0e1420;border-bottom:1px solid var(--line);color:var(--mut)}
   .tbtn{display:flex;align-items:center;gap:5px;padding:5px 7px;border-radius:7px;font-size:12px}
   .tbtn:hover{background:rgba(255,255,255,.05)}
   .tspace{flex:1}
   .tbtn.exp{color:var(--tx)}
   .appbody{display:grid;grid-template-columns:236px 1fr;min-height:430px}
   /* sidebar / binder */
-  .side{background:#121128;border-right:1px solid var(--line);padding:12px 10px;font-size:13px}
+  .side{background:#0f1622;border-right:1px solid var(--line);padding:12px 10px;font-size:13px}
   .search{display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:8px;padding:6px 9px;color:var(--dim);font-size:12px;margin-bottom:14px}
   .phead{display:flex;align-items:center;gap:7px;padding:5px 7px;color:var(--tx);font-weight:600;font-size:12px}
   .phead .bk{color:var(--accent);display:flex}
   .phead .when{margin-left:auto;color:var(--dim);font-size:10px;font-weight:400}
   .chap{padding:7px 9px;border-radius:7px;margin:2px 0}
-  .chap.on{background:rgba(92,107,242,.20)}
+  .chap.on{background:rgba(33,133,199,.20)}
   .chap .t{font-size:13px;font-weight:500;color:var(--tx)}
   .chap .s{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .chap .e{font-size:10px;color:var(--dim)}
@@ -86,7 +86,7 @@
   .swatch-sm{width:15px;height:15px;border-radius:4px;background:var(--accent)}
   .canvas{flex:1;display:flex;justify-content:center;padding:30px 20px 12px;overflow:hidden}
   .page{width:100%;max-width:430px;background:#fff;border-radius:9px;box-shadow:0 18px 46px rgba(0,0,0,.5);padding:40px 44px 30px;color:#1a1a1a;position:relative}
-  .page h3{font-size:20px;margin-bottom:14px;color:#15132a;text-align:center}
+  .page h3{font-size:20px;margin-bottom:14px;color:#152031;text-align:center}
   .page p{font-size:13px;color:#2a2a2a;line-height:1.75;margin-bottom:10px}
   .page .pnum{position:absolute;bottom:12px;left:0;right:0;text-align:center;color:#9a9a9a;font-size:11px}
   .navbar{display:flex;align-items:center;gap:8px;padding:8px 16px;background:var(--bar);border-top:1px solid var(--line);color:var(--mut);font-size:12px}
@@ -100,8 +100,8 @@
   .lead{color:var(--mut);text-align:center;max-width:620px;margin:0 auto 52px;font-size:17px}
   .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
   .feat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;transition:transform .15s,border-color .15s}
-  .feat:hover{transform:translateY(-4px);border-color:rgba(92,107,242,.4)}
-  .feat .fic{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;margin-bottom:14px;background:rgba(92,107,242,.16)}
+  .feat:hover{transform:translateY(-4px);border-color:rgba(33,133,199,.4)}
+  .feat .fic{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;margin-bottom:14px;background:rgba(33,133,199,.16)}
   .feat .fic svg{width:22px;height:22px;stroke:var(--accent2);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
   .feat h4{font-size:16px;margin-bottom:6px}
   .feat p{color:var(--mut);font-size:13.5px}
@@ -113,14 +113,14 @@
   .trustcard{max-width:760px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:34px}
   .trustcard h3{font-size:22px;margin-bottom:8px;display:flex;align-items:center;gap:10px}
   .trustcard p{color:var(--mut);font-size:15px;margin-bottom:14px}
-  .trustcard .pill{display:inline-flex;align-items:center;gap:7px;background:rgba(92,107,242,.14);color:#cfc7ff;padding:6px 13px;border-radius:20px;font-size:12.5px;margin:3px 6px 3px 0}
+  .trustcard .pill{display:inline-flex;align-items:center;gap:7px;background:rgba(33,133,199,.14);color:#bcd8f0;padding:6px 13px;border-radius:20px;font-size:12.5px;margin:3px 6px 3px 0}
 
   .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:10px}
   .step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
   .step .n{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;display:grid;place-items:center;font-weight:700;font-size:14px;margin-bottom:12px}
   .step h4{font-size:15px;margin-bottom:5px}
   .step p{color:var(--mut);font-size:13px}
-  code{background:#000;padding:2px 7px;border-radius:5px;font-size:12.5px;color:#cfc7ff;font-family:"SF Mono",ui-monospace,monospace}
+  code{background:#000;padding:2px 7px;border-radius:5px;font-size:12.5px;color:#bcd8f0;font-family:"SF Mono",ui-monospace,monospace}
 
   .final{text-align:center}
   .final img{width:84px;height:84px;margin:0 auto 22px}
@@ -270,7 +270,7 @@
   <div class="wrap">
     <div class="trustcard">
       <h3>
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7d6cf0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#4aa3e0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         Is it a virus? No. Here's the honest truth.
       </h3>
       <p>When you first open Penwick, macOS may warn you that it's from an "unidentified developer." That is <strong>not</strong> because anything is wrong with it — it's because I haven't paid Apple's <strong>$99/year Developer Program</strong> fee to code-sign the app. I'm one person building this for fun, and I genuinely can't justify $99 a year just to remove a scary dialog.</p>
