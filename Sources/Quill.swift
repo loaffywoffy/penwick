@@ -36,8 +36,8 @@ func displayFontName(_ raw: String?) -> String {
 
 func defaultParagraphStyle() -> NSMutableParagraphStyle {
     let ps = NSMutableParagraphStyle()
-    ps.lineSpacing = 6
-    ps.paragraphSpacing = 6
+    ps.lineSpacing = 2
+    ps.paragraphSpacing = 3
     return ps
 }
 
@@ -1339,22 +1339,6 @@ final class PageTextView: NSTextView {
 
 final class PagesDocView: NSView { override var isFlipped: Bool { true } }
 
-// A signature scroll feel: trackpad keeps its natural momentum, but the mouse
-// wheel gets a snappier, faster glide so paging through a manuscript feels quick.
-final class PagesScrollView: NSScrollView {
-    override func scrollWheel(with event: NSEvent) {
-        if event.hasPreciseScrollingDeltas || event.phase != [] || event.momentumPhase != [] {
-            super.scrollWheel(with: event); return
-        }
-        let clip = contentView
-        var o = clip.bounds.origin
-        o.y -= event.scrollingDeltaY * 2.4
-        let maxY = max(0, (documentView?.frame.height ?? 0) - clip.bounds.height)
-        o.y = min(max(0, o.y), maxY)
-        clip.scroll(to: o)
-        reflectScrolledClipView(clip)
-    }
-}
 
 extension NSColor {
     convenience init?(hexString: String) {
@@ -1461,12 +1445,13 @@ struct RichTextEditor: NSViewRepresentable {
         let c = context.coordinator
         let storage = NSTextStorage(attributedString: store.attributed(for: url))
         Coordinator.darkenInvisibleText(storage)   // pages are white; rescue near-white text
+        Coordinator.normalizeSpacing(storage)       // tighten any old airy line spacing
         let lm = NSLayoutManager()
         storage.addLayoutManager(lm)
         c.textStorage = storage; c.layoutManager = lm
 
         let doc = PagesDocView()
-        let scroll = PagesScrollView()
+        let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.documentView = doc
@@ -1493,7 +1478,7 @@ struct RichTextEditor: NSViewRepresentable {
         let editing = c.pageViews.contains { $0.window?.firstResponder === $0 }
         if !editing, latest.length > 0, !st.isEqual(to: latest) {
             st.setAttributedString(latest)
-            Coordinator.darkenInvisibleText(st)
+            Coordinator.darkenInvisibleText(st); Coordinator.normalizeSpacing(st)
             c.ensurePages()
         } else if numChanged {
             c.reposition()
@@ -1555,7 +1540,7 @@ struct RichTextEditor: NSViewRepresentable {
             tv.textContainerInset = .zero
             tv.defaultParagraphStyle = defaultParagraphStyle()
             tv.typingAttributes = [.font: bodyNSFont(), .foregroundColor: Coordinator.pageTextColor, .paragraphStyle: defaultParagraphStyle()]
-            tv.insertionPointColor = Palette.accentNS()
+            tv.insertionPointColor = Coordinator.pageTextColor
             tv.selectedTextAttributes = [.backgroundColor: NSColor.selectedTextBackgroundColor]
             let sheet = NSView(); sheet.wantsLayer = true; sheet.layer?.cornerRadius = 12
             sheet.shadow = { let s = NSShadow(); s.shadowColor = NSColor.black.withAlphaComponent(0.18); s.shadowBlurRadius = 18; s.shadowOffset = NSSize(width: 0, height: -5); return s }()
@@ -1636,6 +1621,21 @@ struct RichTextEditor: NSViewRepresentable {
                 }
                 let bright = 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent
                 if bright > 0.8 { storage.addAttribute(.foregroundColor, value: pageTextColor, range: range) }
+            }
+            storage.endEditing()
+        }
+
+        // Re-flow existing paragraphs to the current (tighter) line/paragraph spacing,
+        // preserving each paragraph's alignment, so old documents don't look airy.
+        static func normalizeSpacing(_ storage: NSTextStorage) {
+            let full = NSRange(location: 0, length: storage.length)
+            guard full.length > 0 else { return }
+            storage.beginEditing()
+            storage.enumerateAttribute(.paragraphStyle, in: full, options: []) { val, range, _ in
+                let ps = ((val as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle) ?? defaultParagraphStyle()
+                ps.lineSpacing = 2
+                ps.paragraphSpacing = 3
+                storage.addAttribute(.paragraphStyle, value: ps, range: range)
             }
             storage.endEditing()
         }
