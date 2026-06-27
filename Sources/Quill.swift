@@ -1333,11 +1333,8 @@ final class PageTextView: NSTextView {
         return super.becomeFirstResponder()
     }
 
-    // A distinctive caret: a touch wider and in the theme accent colour.
-    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
-        var r = rect; r.size.width = 2.4
-        super.drawInsertionPoint(in: r, color: Palette.accentNS(), turnedOn: flag)
-    }
+    // (The caret is tinted via insertionPointColor — drawing a wider one left ghost
+    // bars behind when it moved, so we let the system draw/erase it.)
 
     // A custom, branded text cursor (an inked I-beam with an accent cap) instead of
     // the stock system one — small detail that makes the app feel hand-made.
