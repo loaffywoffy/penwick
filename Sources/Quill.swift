@@ -1333,35 +1333,8 @@ final class PageTextView: NSTextView {
         return super.becomeFirstResponder()
     }
 
-    // (The caret is tinted via insertionPointColor — drawing a wider one left ghost
-    // bars behind when it moved, so we let the system draw/erase it.)
-
-    // A custom, branded text cursor (an inked I-beam with an accent cap) instead of
-    // the stock system one — small detail that makes the app feel hand-made.
-    override func resetCursorRects() { addCursorRect(bounds, cursor: PageTextView.inkCursor) }
-    override func cursorUpdate(with event: NSEvent) { PageTextView.inkCursor.set() }
-
-    static let inkCursor: NSCursor = {
-        let w: CGFloat = 16, h: CGFloat = 28, mid = 8.0
-        let img = NSImage(size: NSSize(width: w, height: h))
-        img.lockFocus()
-        // soft white halo so it stays visible on the white page
-        NSColor.white.withAlphaComponent(0.92).setStroke()
-        let halo = NSBezierPath(); halo.lineWidth = 3.2; halo.lineCapStyle = .round
-        halo.move(to: NSPoint(x: mid, y: 4)); halo.line(to: NSPoint(x: mid, y: h - 7)); halo.stroke()
-        // the inked bar with serifs
-        NSColor(white: 0.12, alpha: 1).setStroke()
-        let bar = NSBezierPath(); bar.lineWidth = 1.6; bar.lineCapStyle = .round
-        bar.move(to: NSPoint(x: mid, y: 4)); bar.line(to: NSPoint(x: mid, y: h - 7))
-        bar.move(to: NSPoint(x: mid - 3, y: 4)); bar.line(to: NSPoint(x: mid + 3, y: 4))
-        bar.move(to: NSPoint(x: mid - 3, y: h - 7)); bar.line(to: NSPoint(x: mid + 3, y: h - 7))
-        bar.stroke()
-        // accent cap dot
-        Palette.accentNS().setFill()
-        NSBezierPath(ovalIn: NSRect(x: mid - 2.5, y: h - 6, width: 5, height: 5)).fill()
-        img.unlockFocus()
-        return NSCursor(image: img, hotSpot: NSPoint(x: mid, y: h / 2))
-    }()
+    // (Reverted the custom inked cursor at the user's request — back to the
+    // standard system text cursor. The caret stays accent-blue via insertionPointColor.)
 }
 
 final class PagesDocView: NSView { override var isFlipped: Bool { true } }
