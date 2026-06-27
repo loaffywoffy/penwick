@@ -66,10 +66,12 @@ PLIST
 
 echo "APPL????" > "$APP/Contents/PkgInfo"
 
-# Stamp the version from the VERSION file so the in-app updater can compare.
-VERSION=$(cat "$(dirname "$0")/VERSION" 2>/dev/null | tr -d '[:space:]'); [ -z "$VERSION" ] && VERSION="1.0"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist" >/dev/null 2>&1
-echo "Version: $VERSION"
+# No version numbers — stamp an opaque build code (md5 of the compiled binary).
+# The in-app updater compares this against the code published on GitHub.
+CODE=$(md5 -q "$BIN/Penwick")
+/usr/libexec/PlistBuddy -c "Add :PenwickBuildCode string $CODE" "$APP/Contents/Info.plist" >/dev/null 2>&1 \
+  || /usr/libexec/PlistBuddy -c "Set :PenwickBuildCode $CODE" "$APP/Contents/Info.plist" >/dev/null 2>&1
+echo "Build code: $CODE"
 
 codesign --force --deep --sign - "$APP" 2>/dev/null || echo "(codesign skipped)"
 

@@ -1,12 +1,11 @@
 #!/bin/bash
-# Usage: ./release.sh <version> ["release notes"]
+# Usage: ./release.sh ["release notes"]   — no version numbers; uses a build code.
 set -euo pipefail
 cd "$(dirname "$0")"
-NEW="${1:-}"; [ -z "$NEW" ] && { echo "usage: ./release.sh <version> [notes]"; exit 1; }
-NOTES="${2:-Penwick $NEW}"
-echo "$NEW" > VERSION
+NOTES="${1:-Penwick update}"
 ./build.sh
 REL="$HOME/Quill/release"
+CODE=$(/usr/libexec/PlistBuddy -c "Print PenwickBuildCode" build/Penwick.app/Contents/Info.plist)
 # Zip — used by the in-app auto-updater.
 ditto -c -k --keepParent build/Penwick.app "$REL/Penwick.app.zip"
 
@@ -22,7 +21,7 @@ echo "Built: $REL/Penwick.dmg"
 
 cat > "$REL/version.json" <<JSON
 {
-  "version": "$NEW",
+  "code": "$CODE",
   "url": "https://raw.githubusercontent.com/loaffywoffy/penwick-releases/main/Penwick.app.zip",
   "dmg": "https://raw.githubusercontent.com/loaffywoffy/penwick-releases/main/Penwick.dmg",
   "notes": "$NOTES"
@@ -30,6 +29,6 @@ cat > "$REL/version.json" <<JSON
 JSON
 cd "$REL"
 git add -A
-git -c user.email="loaffywoffy@users.noreply.github.com" -c user.name="loaffywoffy" commit -q -m "Penwick $NEW"
+git -c user.email="loaffywoffy@users.noreply.github.com" -c user.name="loaffywoffy" commit -q -m "Penwick ${CODE:0:8}"
 git push -q
-echo "Released $NEW — installed apps will now offer the update."
+echo "Released ${CODE:0:8} — installed apps will now offer the update."

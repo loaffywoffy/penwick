@@ -378,16 +378,16 @@ struct SettingsView: View {
 enum Updater {
     // Public release channel: a version.json + Penwick.app.zip live here.
     static let versionURL = URL(string: "https://raw.githubusercontent.com/loaffywoffy/penwick-releases/main/version.json")!
-    static var current: String { (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0" }
+    // No version numbers — the app carries an opaque build code (md5 of its binary).
+    // Update simply when our code != the code published on GitHub.
+    static var current: String { (Bundle.main.infoDictionary?["PenwickBuildCode"] as? String) ?? "" }
 
-    static func isNewer(_ a: String, than b: String) -> Bool { a.compare(b, options: .numeric) == .orderedDescending }
-
-    static func check() async -> (version: String, url: URL, notes: String)? {
+    static func check() async -> (url: URL, notes: String)? {
         guard let (data, _) = try? await URLSession.shared.data(from: versionURL),
               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let v = j["version"] as? String, let us = j["url"] as? String, let u = URL(string: us) else { return nil }
-        guard isNewer(v, than: current) else { return nil }
-        return (v, u, (j["notes"] as? String) ?? "")
+              let code = j["code"] as? String, let us = j["url"] as? String, let u = URL(string: us) else { return nil }
+        guard code != current, !current.isEmpty else { return nil }
+        return (u, (j["notes"] as? String) ?? "")
     }
 
     @MainActor static func performUpdate(from url: URL) async -> Bool {
@@ -428,8 +428,8 @@ enum Updater {
     Task {
         if let upd = await Updater.check() {
             let alert = NSAlert()
-            alert.messageText = "Update available — Penwick \(upd.version)"
-            alert.informativeText = upd.notes.isEmpty ? "A newer version is available. Update now? Penwick will restart." : upd.notes
+            alert.messageText = "Update available"
+            alert.informativeText = upd.notes.isEmpty ? "A newer build is available. Update now? Penwick will restart." : upd.notes
             alert.addButton(withTitle: "Update Now")
             alert.addButton(withTitle: "Later")
             if alert.runModal() == .alertFirstButtonReturn {
@@ -442,7 +442,7 @@ enum Updater {
             }
         } else if !silent {
             let a = NSAlert(); a.messageText = "You're up to date"
-            a.informativeText = "Penwick \(Updater.current) is the latest version."
+            a.informativeText = "You have the latest build of Penwick."
             a.runModal()
         }
     }
