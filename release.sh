@@ -7,11 +7,24 @@ NOTES="${2:-Penwick $NEW}"
 echo "$NEW" > VERSION
 ./build.sh
 REL="$HOME/Quill/release"
+# Zip — used by the in-app auto-updater.
 ditto -c -k --keepParent build/Penwick.app "$REL/Penwick.app.zip"
+
+# DMG — the human download (drag-to-Applications window).
+echo "Building DMG..."
+STAGE="$(mktemp -d)"
+cp -R build/Penwick.app "$STAGE/Penwick.app"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$REL/Penwick.dmg"
+hdiutil create -volname "Penwick" -srcfolder "$STAGE" -ov -format UDZO "$REL/Penwick.dmg" >/dev/null
+rm -rf "$STAGE"
+echo "Built: $REL/Penwick.dmg"
+
 cat > "$REL/version.json" <<JSON
 {
   "version": "$NEW",
   "url": "https://raw.githubusercontent.com/loaffywoffy/penwick-releases/main/Penwick.app.zip",
+  "dmg": "https://raw.githubusercontent.com/loaffywoffy/penwick-releases/main/Penwick.dmg",
   "notes": "$NOTES"
 }
 JSON

@@ -448,6 +448,36 @@ enum Updater {
     }
 }
 
+// On launch, move any OTHER copies of Penwick to the Trash, keeping only the
+// running app and the canonical /Applications copy. (Stops the "3 copies in
+// Spotlight / which one is real" mess; uses Trash, so it's reversible.)
+@MainActor func cleanupDuplicateApps() {
+    let fm = FileManager.default
+    let me = Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL
+    let keep = URL(fileURLWithPath: "/Applications/Penwick.app").standardizedFileURL
+    DispatchQueue.global(qos: .background).async {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        task.arguments = ["kMDItemCFBundleIdentifier == 'com.penwick.app'"]
+        let pipe = Pipe(); task.standardOutput = pipe; task.standardError = Pipe()
+        do { try task.run() } catch { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return }
+        let dupes = out.split(separator: "\n").map(String.init).compactMap { p -> URL? in
+            let u = URL(fileURLWithPath: p).resolvingSymlinksInPath().standardizedFileURL
+            guard u.lastPathComponent == "Penwick.app", u != me, u != keep else { return nil }
+            // Confirm it really is Penwick before touching it.
+            guard Bundle(url: u)?.bundleIdentifier == "com.penwick.app" else { return nil }
+            return u
+        }
+        guard !dupes.isEmpty else { return }
+        DispatchQueue.main.async {
+            for u in dupes { try? fm.trashItem(at: u, resultingItemURL: nil) }
+        }
+    }
+}
+
 // MARK: - Model
 
 struct Chapter: Identifiable, Equatable {
@@ -1962,7 +1992,7 @@ struct ContentView: View {
             Button("Delete", role: .destructive) { if let c = store.selectedChapter { store.deleteChapter(c.url) } }
             Button("Cancel", role: .cancel) {}
         } message: { Text("\"\(store.selectedChapter?.title ?? "Untitled")\" will be removed from iCloud Drive.") }
-        .onAppear { ensureOnScreen(); checkForUpdates(silent: true) }
+        .onAppear { ensureOnScreen(); cleanupDuplicateApps(); checkForUpdates(silent: true) }
         // Native sheets / alerts instead of custom dimmed overlays.
         .sheet(isPresented: $showGenerator) {
             CharacterGeneratorView(onClose: { showGenerator = false })
