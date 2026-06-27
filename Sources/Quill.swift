@@ -1564,39 +1564,97 @@ struct RichTextEditor: NSViewRepresentable {
             }
         }
 
-        // Does this container still have content that doesn't fit — either unplaced
-        // glyphs, or the trailing empty line (the "extra line fragment") spilling past
-        // the bottom? Both mean we need another page.
-        private func overflows(_ c: NSTextContainer) -> Bool {
-            if layoutManager.glyphRange(for: c).upperBound < layoutManager.numberOfGlyphs { return true }
-            if layoutManager.extraLineFragmentTextContainer === c {
-                return layoutManager.extraLineFragmentRect.maxY > c.size.height + 0.5
-            }
-            return false
+        // ---- Pagination -------------------------------------------------------
+        // One integer source of truth: pagesNeeded(). Measured on a SEPARATE
+        // throwaway NSLayoutManager (fixed-height page-sized containers) attached to
+        // the shared storage only inside the function and removed via defer — so the
+        // DISPLAYED layout is never perturbed mid-measure, and grow/shrink read the
+        // same count and cannot oscillate.
+        private var contentSizeForPage: NSSize {
+            NSSize(width: RichTextEditor.pageW - 2 * RichTextEditor.margin,
+                   height: RichTextEditor.pageH - 2 * RichTextEditor.margin)
         }
-        // A page is removable only if it holds no glyphs AND isn't where the trailing
-        // empty line (caret after a final newline) currently lives.
-        private func isEmptyTrailing(_ c: NSTextContainer) -> Bool {
-            if layoutManager.glyphRange(for: c).length > 0 { return false }
-            if layoutManager.extraLineFragmentTextContainer === c { return false }
-            return true
+        private var isReconciling = false           // reentrancy guard
+        private var lastPageCount = -1
+        private var lastLayoutWidth: CGFloat = -1
+
+        private func pagesNeeded() -> Int {
+            guard let storage = textStorage else { return 1 }
+            let probe = NSLayoutManager()
+            storage.addLayoutManager(probe)
+            defer { storage.removeLayoutManager(probe) }
+
+            func addContainer() {
+                let c = NSTextContainer(size: contentSizeForPage)
+                c.lineFragmentPadding = 0
+                probe.addTextContainer(c)
+            }
+            addContainer()
+            let total = probe.numberOfGlyphs          // forces glyph generation
+            let str = storage.string as NSString
+            let endsNewline = str.length > 0 && str.character(at: str.length - 1) == 0x0A
+            let caretFont = (str.length > 0
+                ? (storage.attribute(.font, at: str.length - 1, effectiveRange: nil) as? NSFont)
+                : nil) ?? bodyNSFont()
+            let lineHeight = probe.defaultLineHeight(for: caretFont) + 2   // + lineSpacing(2)
+
+            var guardN = 0
+            while guardN < 4000 {
+                guardN += 1
+                guard let last = probe.textContainers.last else { break }
+                probe.ensureLayout(for: last)
+                // (1) Unplaced glyphs → need another page.
+                if probe.glyphRange(for: last).upperBound < total { addContainer(); continue }
+                // (2) Everything placed — does the trailing caret line fit on `last`?
+                var trailingFits = true
+                if probe.extraLineFragmentTextContainer === last {
+                    trailingFits = probe.extraLineFragmentRect.maxY <= last.size.height + 0.5
+                } else if endsNewline && probe.glyphRange(for: last).length > 0 {
+                    // Suppressed trailing line (the Enter-at-bottom bug): detect by geometry.
+                    trailingFits = (probe.usedRect(for: last).maxY + lineHeight) <= last.size.height + 0.5
+                }
+                if trailingFits { break }
+                addContainer()
+            }
+            return max(1, probe.textContainers.count)
         }
 
         func ensurePages() {
+            guard !isReconciling else { return }
+            isReconciling = true
+            defer { isReconciling = false }
+
             if pageViews.isEmpty { makePage() }
-            var guardN = 0
-            while guardN < 400, let last = pageViews.last?.textContainer {
-                guardN += 1
-                layoutManager.ensureLayout(for: last)
-                if overflows(last) { makePage() } else { break }
+            let needed = max(1, min(pagesNeeded(), 4000))
+            if pageViews.count < needed {
+                while pageViews.count < needed { makePage() }
+                if let last = pageViews.last?.textContainer { layoutManager.ensureLayout(for: last) }
+            } else if pageViews.count > needed {
+                while pageViews.count > needed { removeLastPage() }
             }
-            guardN = 0
-            while pageViews.count > 1, guardN < 400, let last = pageViews.last?.textContainer {
-                guardN += 1
-                layoutManager.ensureLayout(for: last)
-                if isEmptyTrailing(last) { removeLastPage() } else { break }
-            }
+            // Cheap keystroke path: skip relayout when nothing visible changed.
+            let width = scroll?.contentView.bounds.width ?? RichTextEditor.pageW
+            if pageViews.count == lastPageCount && abs(width - lastLayoutWidth) < 0.5 { return }
+            lastPageCount = pageViews.count
+            lastLayoutWidth = width
             reposition()
+        }
+
+        // Focus the page that hosts the caret after a programmatic edit that may have
+        // changed the page count (used by list auto-continue so the caret never strands).
+        @MainActor private func focusCaret(at caretIndex: Int) {
+            ensurePages()
+            let safeIdx = max(0, min(caretIndex, textStorage.length))
+            let glyph = (safeIdx < textStorage.length)
+                ? layoutManager.glyphIndexForCharacter(at: safeIdx)
+                : max(0, layoutManager.numberOfGlyphs - 1)
+            let host = layoutManager.textContainer(forGlyphAt: glyph, effectiveRange: nil, withoutAdditionalLayout: false)
+            let target = pageViews.first { $0.textContainer === host } ?? pageViews.last
+            if let tv = target {
+                tv.window?.makeFirstResponder(tv)
+                controller.textView = tv
+                tv.setSelectedRange(NSRange(location: safeIdx, length: 0))
+            }
         }
 
         func reposition() {
@@ -1708,13 +1766,13 @@ struct RichTextEditor: NSViewRepresentable {
                 let range = NSRange(location: lineRange.location, length: len)
                 if tv.shouldChangeText(in: range, replacementString: "") {
                     storage.replaceCharacters(in: range, with: ""); tv.didChangeText()
-                    tv.setSelectedRange(NSRange(location: lineRange.location, length: 0))
+                    self.focusCaret(at: lineRange.location)
                 }
             }
             func insert(_ s: String) {
                 if tv.shouldChangeText(in: caret, replacementString: s) {
                     storage.replaceCharacters(in: caret, with: s); tv.didChangeText()
-                    tv.setSelectedRange(NSRange(location: caret.location + (s as NSString).length, length: 0))
+                    self.focusCaret(at: caret.location + (s as NSString).length)
                 }
             }
             if line.hasPrefix("•  ") {
