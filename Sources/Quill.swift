@@ -1564,17 +1564,37 @@ struct RichTextEditor: NSViewRepresentable {
             }
         }
 
+        // Does this container still have content that doesn't fit — either unplaced
+        // glyphs, or the trailing empty line (the "extra line fragment") spilling past
+        // the bottom? Both mean we need another page.
+        private func overflows(_ c: NSTextContainer) -> Bool {
+            if layoutManager.glyphRange(for: c).upperBound < layoutManager.numberOfGlyphs { return true }
+            if layoutManager.extraLineFragmentTextContainer === c {
+                return layoutManager.extraLineFragmentRect.maxY > c.size.height + 0.5
+            }
+            return false
+        }
+        // A page is removable only if it holds no glyphs AND isn't where the trailing
+        // empty line (caret after a final newline) currently lives.
+        private func isEmptyTrailing(_ c: NSTextContainer) -> Bool {
+            if layoutManager.glyphRange(for: c).length > 0 { return false }
+            if layoutManager.extraLineFragmentTextContainer === c { return false }
+            return true
+        }
+
         func ensurePages() {
             if pageViews.isEmpty { makePage() }
             var guardN = 0
             while guardN < 400, let last = pageViews.last?.textContainer {
                 guardN += 1
                 layoutManager.ensureLayout(for: last)
-                if layoutManager.glyphRange(for: last).upperBound < layoutManager.numberOfGlyphs { makePage() } else { break }
+                if overflows(last) { makePage() } else { break }
             }
-            while pageViews.count > 1, let last = pageViews.last?.textContainer,
-                  layoutManager.glyphRange(for: last).length == 0 {
-                removeLastPage()
+            guardN = 0
+            while pageViews.count > 1, guardN < 400, let last = pageViews.last?.textContainer {
+                guardN += 1
+                layoutManager.ensureLayout(for: last)
+                if isEmptyTrailing(last) { removeLastPage() } else { break }
             }
             reposition()
         }
