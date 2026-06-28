@@ -582,25 +582,47 @@ struct SettingsView: View {
                         aiTestResult = ""
                         if new == AIProvider.ollama.rawValue { setupOllama() }   // auto set up on select
                     }
-                    if aiProvider != "Off" {
-                        if providerObj.needsKey {
-                            SecureField("\(providerObj.shortName) API key", text: keyBinding).id("key-\(aiProvider)")
+                    if providerObj.needsKey {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Connect your \(providerObj.shortName) account").font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                if !keyBinding.wrappedValue.isEmpty {
+                                    Label("Linked", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green).labelStyle(.titleAndIcon)
+                                }
+                            }
+                            SecureField("Paste your secret key here", text: keyBinding).id("key-\(aiProvider)")
+                            HStack(spacing: 4) {
+                                Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.secondary)
+                                Text("Kept only on this Mac — never sent anywhere but \(providerObj.shortName).").font(.caption).foregroundStyle(.secondary)
+                                Spacer()
+                                Link("Get a key ↗", destination: URL(string: providerObj == .anthropic ? "https://console.anthropic.com/settings/keys" : "https://platform.openai.com/api-keys")!).font(.caption)
+                            }
                         }
-                        TextField("Model", text: modelBinding, prompt: Text(providerObj.defaultModel)).id("model-\(aiProvider)")
+                    }
+                    if aiProvider != "Off" {
+                        LabeledContent("Model") {
+                            TextField("Model", text: modelBinding, prompt: Text(providerObj.defaultModel)).id("model-\(aiProvider)").multilineTextAlignment(.trailing)
+                        }
                         if aiProvider == AIProvider.ollama.rawValue {
-                            TextField("Ollama URL", text: $aiOllamaURL, prompt: Text("http://localhost:11434"))
+                            LabeledContent("Ollama address") {
+                                TextField("Ollama URL", text: $aiOllamaURL, prompt: Text("http://localhost:11434")).multilineTextAlignment(.trailing)
+                            }
                         }
                         HStack {
                             if aiProvider == AIProvider.ollama.rawValue {
-                                Button(aiTesting ? "Setting up…" : "Auto set up") { setupOllama() }.disabled(aiTesting)
+                                Button(aiTesting ? "Setting up…" : "Set up & test") { setupOllama() }.buttonStyle(.borderedProminent).tint(Palette.accent()).disabled(aiTesting)
                             } else {
-                                Button(aiTesting ? "Testing…" : "Test connection") { testAI() }.disabled(aiTesting)
+                                Button(aiTesting ? "Checking…" : "Test connection") { testAI() }.buttonStyle(.borderedProminent).tint(Palette.accent()).disabled(aiTesting)
                             }
                             if !aiTestResult.isEmpty {
-                                Text(aiTestResult).font(.caption).foregroundStyle(aiTestResult.hasPrefix("Connected") ? .green : .secondary)
+                                Label(aiTestResult, systemImage: aiTestResult.hasPrefix("Connected") ? "checkmark.circle.fill" : "info.circle")
+                                    .font(.caption).foregroundStyle(aiTestResult.hasPrefix("Connected") ? .green : .secondary).labelStyle(.titleAndIcon)
                             }
                         }
-                        Text("Use your own API key, or run a free local model with Ollama (it sets itself up here). A Claude.ai or ChatGPT Plus subscription can't be used — those don't include API access; the API is billed separately.")
+                        Text(aiProvider == AIProvider.ollama.rawValue
+                             ? "Ollama runs a model right on your Mac — completely free, no key, fully private."
+                             : "A Claude.ai / ChatGPT Plus subscription won't work here — those don't include API access. Pay-as-you-go API usage is usually a fraction of a cent per request.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -612,8 +634,8 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
         }
-        .frame(width: 460)
-        .frame(maxHeight: 520)
+        .frame(width: 680)
+        .frame(minHeight: 560, maxHeight: 700)
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.10)))
@@ -1870,12 +1892,21 @@ final class EditorController: ObservableObject {
     }
 
     // Replace a range with new text, keeping the original formatting (font/colour) — used by AI edits.
-    func applyEdit(range: NSRange, text: String) {
+    // Read the formatting of a range's first character (captured when an AI edit is requested).
+    func attributesAt(_ loc: Int) -> [NSAttributedString.Key: Any] {
+        guard let st = textView?.textStorage, st.length > 0 else {
+            return [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: defaultParagraphStyle()]
+        }
+        return st.attributes(at: min(max(0, loc), st.length - 1), effectiveRange: nil)
+    }
+
+    func applyEdit(range: NSRange, text: String, keeping attrs: [NSAttributedString.Key: Any]? = nil) {
         guard let tv = textView, let st = tv.textStorage, NSMaxRange(range) <= st.length else { return }
-        let attrs: [NSAttributedString.Key: Any] = st.length > 0
-            ? st.attributes(at: min(range.location, st.length - 1), effectiveRange: nil)
-            : [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: defaultParagraphStyle()]
-        let repl = NSAttributedString(string: text, attributes: attrs)
+        var a = attrs ?? attributesAt(range.location)
+        if a[.font] == nil { a[.font] = bodyNSFont() }                                   // never lose the font
+        if a[.foregroundColor] == nil { a[.foregroundColor] = NSColor(white: 0.12, alpha: 1) }
+        if a[.paragraphStyle] == nil { a[.paragraphStyle] = defaultParagraphStyle() }
+        let repl = NSAttributedString(string: text, attributes: a)
         if tv.shouldChangeText(in: range, replacementString: text) {
             st.replaceCharacters(in: range, with: repl); tv.didChangeText()
             tv.setSelectedRange(NSRange(location: range.location, length: (text as NSString).length))
@@ -2478,7 +2509,7 @@ struct RichTextEditor: NSViewRepresentable {
             // colours (labelColor etc. resolve dark) — even when the app is in dark mode.
             tv.appearance = NSAppearance(named: .aqua)
             tv.isRichText = true; tv.allowsUndo = true; tv.delegate = self
-            tv.importsGraphics = true; tv.allowsImageEditing = true   // paste/drag images
+            tv.importsGraphics = false   // images removed (paste stays text-only)
             tv.isContinuousSpellCheckingEnabled = true; tv.isGrammarCheckingEnabled = true
             tv.isAutomaticSpellingCorrectionEnabled = false
             tv.isAutomaticQuoteSubstitutionEnabled = true; tv.isAutomaticDashSubstitutionEnabled = true
@@ -2944,7 +2975,7 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(onClose: { showSettings = false })
                 .environmentObject(store)
-                .frame(minWidth: 420, idealWidth: 460, minHeight: 420, idealHeight: 500)
+                .frame(minWidth: 680, idealWidth: 680, minHeight: 560, idealHeight: 640)
         }
         .sheet(isPresented: $showCollab) {
             CollaborateView(store: store, onClose: { showCollab = false })
@@ -3271,10 +3302,7 @@ struct FormatBar: View {
                   fmt("list.number", active: editor.selList == .numbered) { editor.list(numbered: true) }
                   fmt("checklist", active: editor.selList == .checklist) { editor.checklist() } }
             bar
-            grp {
-                fmt("photo") { penwickInsertImage(editor) }
-                fmt("bubble.left") { penwickAddComment(store, editor) }
-            }
+            fmt("bubble.left") { penwickAddComment(store, editor) }
             bar
             fmt("sparkles") { NotificationCenter.default.post(name: .openPenwickAIChat, object: nil) }
         }
@@ -3949,6 +3977,7 @@ struct AIChatPanel: View {
     @State private var thinking = false
     @State private var proposalRange: NSRange?
     @State private var proposalText = ""
+    @State private var proposalAttrs: [NSAttributedString.Key: Any] = [:]
 
     private let brand = "You are the writing assistant built into Penwick, a native Mac app for writing books and screenplays. The user is working on their manuscript. Be warm, concise, and practical — help with prose, brainstorming, structure, and names."
 
@@ -4036,7 +4065,7 @@ struct AIChatPanel: View {
             Text("PROPOSED EDIT").font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(.secondary)
             Text(proposalText).font(.system(size: 13)).foregroundStyle(.primary)
             HStack {
-                Button("Approve") { editor.applyEdit(range: range, text: proposalText); editor.aiMessages.append(AIMessage(role: "ai", text: "Applied — your font is kept.")); proposalRange = nil }
+                Button("Approve") { editor.applyEdit(range: range, text: proposalText, keeping: proposalAttrs); editor.aiMessages.append(AIMessage(role: "ai", text: "Applied — your font is kept.")); proposalRange = nil }
                     .buttonStyle(.borderedProminent).controlSize(.small).tint(Palette.accent())
                 Button("Discard") { proposalRange = nil; editor.aiMessages.append(AIMessage(role: "ai", text: "Discarded.")) }
                     .buttonStyle(.bordered).controlSize(.small)
@@ -4054,6 +4083,7 @@ struct AIChatPanel: View {
         let tv = editor.textView
         let sel = tv?.selectedRange() ?? NSRange(location: 0, length: 0)
         let selText = (sel.length > 0 && tv != nil) ? (tv!.string as NSString).substring(with: sel) : ""
+        let selAttrs = sel.length > 0 ? editor.attributesAt(sel.location) : [:]   // capture the original font now
         editor.aiMessages.append(AIMessage(role: "you", text: text))
         thinking = true
         let history = editor.aiMessages.map { "\($0.role == "you" ? "User" : "Assistant"): \($0.text)" }.joined(separator: "\n")
@@ -4064,7 +4094,7 @@ struct AIChatPanel: View {
                         system: brand + " Apply the user's instruction to the passage and return ONLY the revised passage — no preamble, no quotes, no markdown.",
                         prompt: "Instruction: \(text)\n\nPassage:\n\(selText)")
                     await MainActor.run {
-                        proposalText = reply.trimmingCharacters(in: .whitespacesAndNewlines); proposalRange = sel
+                        proposalText = reply.trimmingCharacters(in: .whitespacesAndNewlines); proposalRange = sel; proposalAttrs = selAttrs
                         editor.aiMessages.append(AIMessage(role: "ai", text: "Here's a revision — approve to apply it to your selection.")); thinking = false
                     }
                 } else {
