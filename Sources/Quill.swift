@@ -368,6 +368,7 @@ extension Notification.Name {
     static let openPenwickCollaborate = Notification.Name("openPenwickCollaborate")
     static let openPenwickNewProject = Notification.Name("openPenwickNewProject")
     static let penwickJoinRequest = Notification.Name("penwickJoinRequest")
+    static let openPenwickAIChat = Notification.Name("openPenwickAIChat")
 }
 
 // MARK: - AI (optional: link your own API key, or a local Ollama)
@@ -2984,7 +2985,10 @@ struct ContentView: View {
 struct Binder: View {
     @EnvironmentObject var store: PenwickStore
     @AppStorage("theme") private var activeTheme = "Ocean"   // observe so accent repaints live
-    @State private var collapsed: Set<URL> = []
+    @State private var collapsed: Set<URL> = Binder.loadCollapsed()
+    static func loadCollapsed() -> Set<URL> {
+        Set((UserDefaults.standard.array(forKey: "collapsedProjects") as? [String] ?? []).map { URL(fileURLWithPath: $0) })
+    }
     @State private var search = ""
     @State private var renameTarget: Project?
     @State private var renameText = ""
@@ -3096,6 +3100,9 @@ struct Binder: View {
             }
             .listStyle(.sidebar)
             .searchable(text: $search, placement: .sidebar, prompt: "Search manuscript")
+        }
+        .onChange(of: collapsed) { _, new in
+            UserDefaults.standard.set(new.map { $0.path }, forKey: "collapsedProjects")   // remember across restarts
         }
         .alert("Rename Project", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
             TextField("Name", text: $renameText)
@@ -3250,6 +3257,8 @@ struct FormatBar: View {
                 fmt("photo") { penwickInsertImage(editor) }
                 fmt("bubble.left") { penwickAddComment(store, editor) }
             }
+            bar
+            fmt("sparkles") { NotificationCenter.default.post(name: .openPenwickAIChat, object: nil) }
         }
     }
 
@@ -3362,23 +3371,16 @@ struct EditorView: View {
 
                 ChapterNavBar()
             }
-            // Floating AI assistant — chat + approve-to-edit.
+            // AI assistant panel — opened from the format-bar sparkles button.
             .overlay(alignment: .bottomTrailing) {
-                VStack(alignment: .trailing, spacing: 12) {
-                    if showAI { AIChatPanel(editor: editor, onClose: { showAI = false }).transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity)) }
-                    Button { showAI.toggle() } label: {
-                        Image(systemName: showAI ? "xmark" : "sparkles")
-                            .font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
-                            .frame(width: 48, height: 48)
-                            .background(Circle().fill(LinearGradient(colors: [Palette.accent(), Palette.accentDark()], startPoint: .topLeading, endPoint: .bottomTrailing)))
-                            .shadow(color: Palette.accent().opacity(0.45), radius: 12, y: 5)
-                    }
-                    .buttonStyle(.plain).hoverScale(1.08)
-                    .help("AI assistant")
+                if showAI {
+                    AIChatPanel(editor: editor, onClose: { showAI = false })
+                        .padding(20)
+                        .transition(.scale(scale: 0.92, anchor: .bottomTrailing).combined(with: .opacity))
                 }
-                .padding(20)
-                .animation(.spring(response: 0.3, dampingFraction: 0.78), value: showAI)
             }
+            .animation(.spring(response: 0.3, dampingFraction: 0.78), value: showAI)
+            .onReceive(NotificationCenter.default.publisher(for: .openPenwickAIChat)) { _ in showAI.toggle() }
         }
     }
 }
