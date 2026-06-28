@@ -954,6 +954,18 @@ final class PenwickStore: ObservableObject {
         commentsByChapter = map
     }
     func comments(for url: URL) -> [Comment] { (commentsByChapter[url] ?? []).sorted { $0.location < $1.location } }
+    // Best range for a comment: the stored one if the text still matches there, else
+    // re-find the quoted text (so comments don't drift when the chapter is edited).
+    func resolvedRange(_ c: Comment, in text: String) -> NSRange? {
+        let ns = text as NSString
+        let stored = NSRange(location: c.location, length: c.length)
+        if c.length > 0, NSMaxRange(stored) <= ns.length, ns.substring(with: stored) == c.quote { return stored }
+        if !c.quote.isEmpty {
+            let f = ns.range(of: c.quote)
+            if f.location != NSNotFound { return f }
+        }
+        return (c.length > 0 && NSMaxRange(stored) <= ns.length) ? stored : nil
+    }
     private func saveComments(for url: URL) {
         let dir = url.deletingLastPathComponent()
         let file = commentsFile(dir)
@@ -1036,8 +1048,11 @@ final class PenwickStore: ObservableObject {
         let base = url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "/", with: "-")
         let name = String(format: "%02d %@.rtf", n, base)
         let dest = project.url.appendingPathComponent(name)
-        guard let data = try? attr.rtf(from: NSRange(location: 0, length: attr.length),
-                                       documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) else { return nil }
+        let full = NSRange(location: 0, length: attr.length)
+        let data: Data? = attr.containsAttachments(in: full)
+            ? attr.rtfd(from: full, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
+            : attr.rtf(from: full, documentAttributes: [:])
+        guard let data = data else { return nil }
         try? data.write(to: dest)
         reload()
         return projects.first { $0.url == project.url }?.chapters.first { $0.url.lastPathComponent == name }?.url
@@ -2130,8 +2145,7 @@ struct RichTextEditor: NSViewRepresentable {
             let full = NSRange(location: 0, length: st.length)
             lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full)
             for c in parent.store.comments(for: parent.url) {
-                let r = NSRange(location: c.location, length: c.length)
-                if r.length > 0, NSMaxRange(r) <= st.length {
+                if let r = parent.store.resolvedRange(c, in: st.string), r.length > 0, NSMaxRange(r) <= st.length {
                     lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.32), forCharacterRange: r)
                 }
             }
@@ -3390,7 +3404,10 @@ struct CommentsView: View {
                                 HStack {
                                     Text("\(c.author) · \(stamp(c.date))").font(.system(size: 10)).foregroundStyle(.tertiary)
                                     Spacer()
-                                    Button("Go to") { editor.goTo(range: NSRange(location: c.location, length: c.length)); onClose() }
+                                    Button("Go to") {
+                                        let r = store.resolvedRange(c, in: editor.textView?.string ?? "") ?? NSRange(location: c.location, length: c.length)
+                                        editor.goTo(range: r); onClose()
+                                    }
                                         .font(.system(size: 11)).buttonStyle(.borderless)
                                     Button { store.deleteComment(c.id, for: url) } label: { Image(systemName: "trash").font(.system(size: 11)) }
                                         .buttonStyle(.borderless).foregroundStyle(.red)
