@@ -1835,6 +1835,72 @@ final class PageTextView: NSTextView {
         return super.becomeFirstResponder()
     }
 
+    // ── Comment hover bubble — appears after ~0.25s and follows the cursor ──────
+    var commentRanges: [(range: NSRange, text: String)] = []
+    private var hoverTracking: NSTrackingArea?
+    private var hoverTimer: Timer?
+    private var bubbleWindow: NSWindow?
+    private var bubbleText: String?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = hoverTracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(t); hoverTracking = t
+    }
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let pt = convert(event.locationInWindow, from: nil)
+        guard let text = commentText(at: pt) else { hoverTimer?.invalidate(); hoverTimer = nil; hideBubble(); return }
+        if bubbleWindow != nil {
+            if text != bubbleText { hideBubble(); showBubble(text, at: event) } else { positionBubble(at: event) }
+        } else {
+            hoverTimer?.invalidate()
+            hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+                self?.showBubble(text, at: event)
+            }
+        }
+    }
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event); hoverTimer?.invalidate(); hoverTimer = nil; hideBubble()
+    }
+    private func commentText(at pt: NSPoint) -> String? {
+        guard !commentRanges.isEmpty, let lm = layoutManager, let tc = textContainer, let st = textStorage, st.length > 0 else { return nil }
+        let p = NSPoint(x: pt.x - textContainerOrigin.x, y: pt.y - textContainerOrigin.y)
+        var frac: CGFloat = 0
+        let gi = lm.glyphIndex(for: p, in: tc, fractionOfDistanceThroughGlyph: &frac)
+        guard lm.boundingRect(forGlyphRange: NSRange(location: gi, length: 1), in: tc).contains(p) else { return nil }
+        let ci = lm.characterIndexForGlyph(at: gi)
+        return commentRanges.first { NSLocationInRange(ci, $0.range) }?.text
+    }
+    private func showBubble(_ text: String, at event: NSEvent) {
+        guard let host = window else { return }
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 12); label.textColor = .white; label.drawsBackground = false; label.isBezeled = false; label.isEditable = false
+        label.preferredMaxLayoutWidth = 260
+        let size = label.sizeThatFits(NSSize(width: 260, height: 400))
+        let pad: CGFloat = 9
+        let cv = NSView(frame: NSRect(x: 0, y: 0, width: size.width + pad * 2, height: size.height + pad * 2))
+        cv.wantsLayer = true; cv.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.97).cgColor; cv.layer?.cornerRadius = 8
+        label.frame = NSRect(x: pad, y: pad, width: size.width, height: size.height)
+        cv.addSubview(label)
+        let win = NSWindow(contentRect: cv.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        win.isOpaque = false; win.backgroundColor = .clear; win.level = .floating; win.ignoresMouseEvents = true; win.hasShadow = true
+        win.contentView = cv
+        host.addChildWindow(win, ordered: .above)
+        bubbleWindow = win; bubbleText = text
+        positionBubble(at: event)
+    }
+    private func positionBubble(at event: NSEvent) {
+        guard let win = bubbleWindow, let host = window else { return }
+        let screen = host.convertPoint(toScreen: event.locationInWindow)
+        win.setFrameOrigin(NSPoint(x: screen.x + 14, y: screen.y - win.frame.height - 14))
+    }
+    private func hideBubble() {
+        if let w = bubbleWindow { w.parent?.removeChildWindow(w); w.orderOut(nil) }
+        bubbleWindow = nil; bubbleText = nil
+    }
+
     // Click a checklist box (☐ / ☑) to tick it off.
     override func mouseDown(with event: NSEvent) {
         if toggleCheckboxIfHit(at: convert(event.locationInWindow, from: nil)) { return }
@@ -2243,21 +2309,13 @@ struct RichTextEditor: NSViewRepresentable {
             guard let lm = layoutManager, let st = textStorage else { return }
             let full = NSRange(location: 0, length: st.length)
             lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full)
-            for tv in pageViews { tv.removeAllToolTips() }   // hover shows the comment text
+            var ranges: [(NSRange, String)] = []
             for c in parent.store.comments(for: parent.url) {
                 guard let r = parent.store.resolvedRange(c, in: st.string), r.length > 0, NSMaxRange(r) <= st.length else { continue }
                 lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.32), forCharacterRange: r)
-                let gr = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
-                let tip = "\(c.author): \(c.text)"
-                for tv in pageViews {
-                    guard let tc = tv.textContainer else { continue }
-                    let inter = NSIntersectionRange(gr, lm.glyphRange(for: tc))
-                    if inter.length == 0 { continue }
-                    let rect = lm.boundingRect(forGlyphRange: inter, in: tc)
-                        .offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)
-                    tv.addToolTip(rect, owner: tip as NSString, userData: nil)
-                }
+                ranges.append((r, "\(c.author): \(c.text)"))
             }
+            for tv in pageViews { tv.commentRanges = ranges }   // drives the hover bubble
         }
 
         func reposition() {
