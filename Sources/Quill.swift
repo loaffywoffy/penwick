@@ -486,7 +486,6 @@ enum AIClient {
 struct SettingsView: View {
     @EnvironmentObject var store: PenwickStore
     @AppStorage("appearance") private var appearance = "auto"
-    @AppStorage("theme") private var theme = "Ocean"
     @AppStorage("aiProvider") private var aiProvider = "Off"
     @AppStorage("aiKey") private var aiKey = ""
     @AppStorage("aiModel") private var aiModel = ""
@@ -2820,7 +2819,6 @@ struct ContentView: View {
     @State private var newProjectName = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @AppStorage("appearance") private var appearance = "auto"
-    @AppStorage("theme") private var theme = "Ocean"
     @AppStorage("focusMode") private var focusMode = false
 
     private var scheme: ColorScheme? {
@@ -2876,10 +2874,8 @@ struct ContentView: View {
                 Button { showSettings = true } label: { Image(systemName: "gearshape") }
                     .help("Settings (⌘,)")
 
-                // Tools.
+                // Tools (image & comment live in the format bar; this is the rest).
                 Menu {
-                    Button("Insert Image…") { penwickInsertImage(editor) }.disabled(store.selectedChapter == nil)
-                    Button("Add Comment…") { penwickAddComment(store, editor) }.disabled(store.selectedChapter == nil)
                     Button("Comments…") { showComments = true }.disabled(store.selectedChapter == nil)
                     Button("Name Generator…") { showGenerator = true }
                     Button("Version History…") { showHistory = true }.disabled(store.selectedChapter == nil)
@@ -4217,8 +4213,8 @@ struct HomeView: View {
                     toolTile("clock.arrow.circlepath", "Version history", "Restore earlier drafts") { post(.openPenwickHistory) }
                     toolTile("arrow.down.doc", "Export", "PDF, DOCX, Fountain & more") { post(.openPenwickExport) }
                     toolTile("person.2", "Collaborate", "Write together via iCloud") { post(.openPenwickCollaborate) }
-                    toolTile("number", "Page numbers", "Per-project, styleable") { if let u = recent.first?.url { store.selection = u } }
-                    toolTile("gearshape", "Settings", "Theme, name, updates") { post(.openPenwickSettings) }
+                    toolTile("sparkles", "AI assistant", "Linked in Settings") { post(.openPenwickSettings) }
+                    toolTile("gearshape", "Settings", "Appearance, name, updates") { post(.openPenwickSettings) }
                 }
 
                 if !store.collaborators.isEmpty {
