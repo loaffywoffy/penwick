@@ -734,6 +734,61 @@ final class PenwickStore: ObservableObject {
         reload()
     }
 
+    // MARK: Collaboration room codes — a memorable 3-word join code (e.g. TAN-ARM-HER).
+    // Stored in <project>/.penwick/room.json so it travels with the shared folder.
+    // Common, easy-to-spell 3-letter words only.
+    static let roomWords = ["cat","dog","sun","sky","sea","run","top","tap","tan","arm","leg",
+        "ear","eye","cup","pen","ink","map","key","box","bag","bed","cap","car","bus","van","jet",
+        "fox","owl","ant","bee","cow","hen","pig","bat","rat","hat","mat","net","pot","pan","jar",
+        "mug","fan","log","ice","fog","ray","day","oak","elm","tea","pie","jam","egg","ham","nut",
+        "bun","pea","cod","kid","pup","joy","paw","fur","sit","hop","jog","row","oar","cub"]
+
+    private func roomFile(_ p: Project) -> URL { p.url.appendingPathComponent(".penwick/room.json") }
+    private func canonCode(_ s: String) -> String { String(s.uppercased().filter { $0 >= "A" && $0 <= "Z" }) }
+
+    func roomCode(for p: Project) -> String? {
+        guard let d = try? Data(contentsOf: roomFile(p)),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let c = j["code"] as? String else { return nil }
+        return c
+    }
+    @discardableResult func ensureRoomCode(for p: Project) -> String {
+        roomCode(for: p) ?? regenerateRoomCode(for: p)
+    }
+    @discardableResult func regenerateRoomCode(for p: Project) -> String {
+        var picks: [String] = []
+        while picks.count < 3 { let w = Self.roomWords.randomElement() ?? "pen"; if !picks.contains(w) { picks.append(w) } }
+        let code = picks.map { $0.uppercased() }.joined(separator: "-")
+        let dir = p.url.appendingPathComponent(".penwick", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: ["code": code]) { try? data.write(to: roomFile(p)) }
+        return code
+    }
+
+    // Find a project whose room code matches and open it. Scans linked projects plus
+    // the iCloud Drive (where an accepted share lands) so a code "auto-matches".
+    @discardableResult func joinRoom(code entered: String) -> Bool {
+        let target = canonCode(entered)
+        guard target.count == 9 else { return false }
+        let fm = FileManager.default
+        var candidates = projectFolders()
+        let iCloudRoot = root.deletingLastPathComponent()   // …/CloudDocs
+        for parent in [iCloudRoot, root] {
+            if let items = try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                for d in items where (try? d.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { candidates.append(d) }
+            }
+        }
+        for url in candidates {
+            guard let d = try? Data(contentsOf: url.appendingPathComponent(".penwick/room.json")),
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let c = j["code"] as? String, canonCode(c) == target else { continue }
+            if url.path.hasPrefix(root.path) { reload(); selection = projects.first { $0.url == url }?.chapters.first?.url }
+            else { _ = openExternalProject(url) }
+            return true
+        }
+        return false
+    }
+
     // All project folders: local subfolders of root + linked external ones.
     private func projectFolders() -> [URL] {
         let fm = FileManager.default
@@ -1979,6 +2034,7 @@ struct ContentView: View {
     @State private var showGenerator = false
     @State private var showHistory = false
     @State private var showSettings = false
+    @State private var showCollab = false
     @State private var showNewProject = false
     @State private var newProjectName = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -2055,7 +2111,7 @@ struct ContentView: View {
 
                 // People / collaboration — everything about writing with others.
                 Menu {
-                    Button("Invite People to Collaborate…") { penwickCollaborate(store) }
+                    Button("Collaborate with a Code…") { showCollab = true }
                         .disabled(store.currentProject == nil)
                     Button("Open Shared Project…") { penwickOpenProject(store) }
                     Button("Send a Copy…") { penwickShare(store, editor) }
@@ -2096,6 +2152,10 @@ struct ContentView: View {
                 .environmentObject(store)
                 .frame(minWidth: 420, idealWidth: 460, minHeight: 420, idealHeight: 500)
         }
+        .sheet(isPresented: $showCollab) {
+            CollaborateView(store: store, onClose: { showCollab = false })
+                .frame(minWidth: 420, idealWidth: 420, minHeight: 440, idealHeight: 460)
+        }
         .alert("New Manuscript", isPresented: $showNewProject) {
             TextField("Project name", text: $newProjectName)
             Button("Create") {
@@ -2109,7 +2169,7 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickGenerator)) { _ in showGenerator = true }
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickHistory)) { _ in if store.selectedChapter != nil { showHistory = true } }
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickExport)) { _ in penwickExport(store, editor) }
-        .onReceive(NotificationCenter.default.publisher(for: .openPenwickCollaborate)) { _ in penwickCollaborate(store) }
+        .onReceive(NotificationCenter.default.publisher(for: .openPenwickCollaborate)) { _ in showCollab = true }
         .animation(.easeInOut(duration: 0.18), value: showGenerator)
         .animation(.easeInOut(duration: 0.18), value: showHistory)
         .animation(.easeInOut(duration: 0.18), value: showSettings)
@@ -2846,6 +2906,78 @@ struct CharacterCard: View {
 
 // The home pane — lives inside the normal split view (sidebar stays visible),
 // uses the editor's own surface/accent, and scrolls. Shown when no chapter is open.
+// Collaborate via a memorable 3-word room code.
+struct CollaborateView: View {
+    @ObservedObject var store: PenwickStore
+    var onClose: () -> Void
+    @Environment(\.colorScheme) var scheme
+    @State private var code = ""
+    @State private var joinText = ""
+    @State private var joinMsg = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Collaborate").font(.system(size: 18, weight: .semibold))
+                    Text("Write together with a room code").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { onClose() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary) }.buttonStyle(.plain)
+            }
+
+            if let proj = store.currentProject {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("YOUR ROOM CODE").font(.system(size: 10, weight: .bold)).tracking(1).foregroundStyle(.secondary)
+                    Text(code).font(.system(size: 30, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(Palette.accent())
+                    Text("for “\(proj.name)”").font(.system(size: 12)).foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        capsule("Invite people…", filled: true) { penwickCollaborate(store) }
+                        capsule("Copy", filled: false) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string) }
+                        capsule("New code", filled: false) { code = store.regenerateRoomCode(for: proj) }
+                    }
+                    Text("Tap Invite people to send the iCloud invite, then tell your collaborator this code. They type it below to jump straight into the same project.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 14).fill(Palette.paper(scheme)))
+                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08)))
+            } else {
+                Text("Open a project first to start a session.").font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("JOIN A SESSION").font(.system(size: 10, weight: .bold)).tracking(1).foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    TextField("TAN-ARM-HER", text: $joinText)
+                        .textFieldStyle(.roundedBorder).font(.system(size: 15, design: .monospaced)).onSubmit(join)
+                    capsule("Join", filled: true, action: join)
+                }
+                if !joinMsg.isEmpty {
+                    Text(joinMsg).font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(20).frame(width: 380)
+        .onAppear { if let p = store.currentProject { code = store.ensureRoomCode(for: p) } }
+    }
+
+    private func join() {
+        if store.joinRoom(code: joinText) { onClose() }
+        else { joinMsg = "No project found for that code yet. Make sure you've accepted their iCloud invite, then try again." }
+    }
+    private func capsule(_ t: String, filled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(t).font(.system(size: 13))
+                .foregroundStyle(filled ? Color.white : Palette.accent())
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(Capsule().fill(filled ? Palette.accent() : Color.clear))
+                .overlay(Capsule().strokeBorder(Palette.accent(), lineWidth: filled ? 0 : 1))
+        }.buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
+    }
+}
+
 struct HomeView: View {
     @EnvironmentObject var store: PenwickStore
     @Environment(\.colorScheme) var scheme
