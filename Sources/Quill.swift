@@ -494,6 +494,7 @@ enum AIClient {
 struct SettingsView: View {
     @EnvironmentObject var store: PenwickStore
     @AppStorage("appearance") private var appearance = "auto"
+    @AppStorage("autocorrect") private var autocorrect = true
     @AppStorage("aiProvider") private var aiProvider = "Off"
     @AppStorage("aiOllamaURL") private var aiOllamaURL = ""
     @State private var aiTesting = false
@@ -577,6 +578,10 @@ struct SettingsView: View {
                     Picker("Appearance", selection: $appearance) {
                         Text("System").tag("auto"); Text("Light").tag("light"); Text("Dark").tag("dark")
                     }
+                }
+                Section("Writing") {
+                    Toggle("Autocorrect spelling", isOn: $autocorrect)
+                    Text("Fixes a misspelled word automatically as you finish it — picking the single best correction.").font(.caption).foregroundStyle(.secondary)
                 }
                 Section("AI assistant") {
                     Picker("Provider", selection: $aiProvider) {
@@ -2208,7 +2213,7 @@ final class PageTextView: NSTextView {
         return super.becomeFirstResponder()
     }
 
-    // ── Comment hover — instant bubble; hold ⌘ to open a full, repliable card ──────
+    // ── Comment hover — instant bubble; HOLD ⌘ (bar fills, accelerating) to open ──────
     var commentRanges: [(range: NSRange, comment: Comment)] = []
     weak var commentStore: PenwickStore?
     var commentURL: URL?
@@ -2218,6 +2223,12 @@ final class PageTextView: NSTextView {
     private var hoverComment: Comment?
     private var hoverRect: NSRect = .zero
     private var detailPopover: NSPopover?
+    private var flagsMonitor: Any?
+    private var holdTimer: Timer?
+    private var holdStart: TimeInterval = 0
+    private var holdBar: CALayer?
+    private var holdBarWidth: CGFloat = 0
+    private let holdDuration: TimeInterval = 0.6
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -2228,23 +2239,46 @@ final class PageTextView: NSTextView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         let pt = convert(event.locationInWindow, from: nil)
-        guard let hit = commentAt(pt) else { hoverComment = nil; hideBubble(); return }
+        guard let hit = commentAt(pt) else { clearHover(); return }
         hoverComment = hit.comment; hoverRect = hit.rect
-        if event.modifierFlags.contains(.command) { showDetail() ; return }   // already holding ⌘
-        let key = hit.comment.id
-        if bubbleWindow != nil {
-            if key != bubbleKey { hideBubble(); showBubble(hit.comment, at: event) } else { positionBubble(at: event) }
-        } else {
-            showBubble(hit.comment, at: event)   // instant, no delay
+        startFlagsMonitor()
+        if bubbleWindow == nil || bubbleKey != hit.comment.id { hideBubble(); cancelHold(); showBubble(hit.comment, at: event) }
+        else { positionBubble(at: event) }
+        if NSEvent.modifierFlags.contains(.command) { startHold() }
+    }
+    override func mouseExited(with event: NSEvent) { super.mouseExited(with: event); clearHover() }
+    private func clearHover() { hoverComment = nil; cancelHold(); hideBubble(); stopFlagsMonitor() }
+
+    private func startFlagsMonitor() {
+        guard flagsMonitor == nil else { return }
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] e in
+            guard let self else { return e }
+            if e.modifierFlags.contains(.command) { self.startHold() } else { self.cancelHold() }
+            return e
         }
     }
-    override func flagsChanged(with event: NSEvent) {
-        super.flagsChanged(with: event)
-        if event.modifierFlags.contains(.command), hoverComment != nil { showDetail() }
+    private func stopFlagsMonitor() { if let m = flagsMonitor { NSEvent.removeMonitor(m); flagsMonitor = nil } }
+
+    private func startHold() {
+        guard holdTimer == nil, hoverComment != nil, bubbleWindow != nil, detailPopover == nil else { return }
+        holdStart = Date().timeIntervalSince1970
+        holdTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.tickHold() }
     }
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event); hoverComment = nil; hideBubble()
+    private func tickHold() {
+        let t = (Date().timeIntervalSince1970 - holdStart) / holdDuration
+        let fill = min(1, pow(CGFloat(max(0, t)), 2.6))   // accelerates toward the end
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        holdBar?.frame.size.width = holdBarWidth * fill
+        CATransaction.commit()
+        if t >= 1 { cancelHold(); showDetail() }
     }
+    private func cancelHold() {
+        holdTimer?.invalidate(); holdTimer = nil
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        holdBar?.frame.size.width = 0
+        CATransaction.commit()
+    }
+
     private func commentAt(_ pt: NSPoint) -> (comment: Comment, rect: NSRect)? {
         guard !commentRanges.isEmpty, let lm = layoutManager, let tc = textContainer, let st = textStorage, st.length > 0 else { return nil }
         let p = NSPoint(x: pt.x - textContainerOrigin.x, y: pt.y - textContainerOrigin.y)
@@ -2259,15 +2293,21 @@ final class PageTextView: NSTextView {
     }
     private func showBubble(_ c: Comment, at event: NSEvent) {
         guard let host = window else { return }
-        let label = NSTextField(wrappingLabelWithString: "\(c.author): \(c.text)\n⌘ to reply")
+        let label = NSTextField(wrappingLabelWithString: "\(c.author): \(c.text)\nHold ⌘ to open")
         label.font = .systemFont(ofSize: 12); label.textColor = .white; label.drawsBackground = false; label.isBezeled = false; label.isEditable = false
         label.preferredMaxLayoutWidth = 250
         let size = label.sizeThatFits(NSSize(width: 250, height: 400))
-        let pad: CGFloat = 9
-        let cv = NSView(frame: NSRect(x: 0, y: 0, width: size.width + pad * 2, height: size.height + pad * 2))
+        let pad: CGFloat = 9, barH: CGFloat = 4
+        let cv = NSView(frame: NSRect(x: 0, y: 0, width: size.width + pad * 2, height: size.height + pad * 2 + barH + 5))
         cv.wantsLayer = true; cv.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.97).cgColor; cv.layer?.cornerRadius = 8
-        label.frame = NSRect(x: pad, y: pad, width: size.width, height: size.height)
+        label.frame = NSRect(x: pad, y: pad + barH + 5, width: size.width, height: size.height)
         cv.addSubview(label)
+        let track = CALayer(); track.frame = NSRect(x: pad, y: pad, width: size.width, height: barH)
+        track.backgroundColor = NSColor(white: 1, alpha: 0.18).cgColor; track.cornerRadius = barH / 2
+        let bar = CALayer(); bar.frame = NSRect(x: pad, y: pad, width: 0, height: barH)
+        bar.backgroundColor = Palette.accentNS().cgColor; bar.cornerRadius = barH / 2
+        cv.layer?.addSublayer(track); cv.layer?.addSublayer(bar)
+        holdBar = bar; holdBarWidth = size.width
         let win = NSWindow(contentRect: cv.frame, styleMask: .borderless, backing: .buffered, defer: false)
         win.isOpaque = false; win.backgroundColor = .clear; win.level = .floating; win.ignoresMouseEvents = true; win.hasShadow = true
         win.contentView = cv
@@ -2282,17 +2322,19 @@ final class PageTextView: NSTextView {
     }
     private func hideBubble() {
         if let w = bubbleWindow { w.parent?.removeChildWindow(w); w.orderOut(nil) }
-        bubbleWindow = nil; bubbleKey = nil
+        bubbleWindow = nil; bubbleKey = nil; holdBar = nil
     }
-    // Hold ⌘ over a comment → open the full interactive card (read, reply, delete).
+    // Open the full interactive card (read, reply, delete) once the hold completes.
     private func showDetail() {
         guard detailPopover == nil, let c = hoverComment, let store = commentStore, let url = commentURL else { return }
-        hideBubble()
+        let rect = hoverRect
+        hideBubble(); stopFlagsMonitor(); hoverComment = nil
         let pop = NSPopover(); pop.behavior = .transient
         pop.contentViewController = NSHostingController(rootView: CommentDetailView(store: store, url: url, commentId: c.id, onClose: { [weak self] in self?.detailPopover?.performClose(nil); self?.detailPopover = nil }))
-        pop.show(relativeTo: hoverRect, of: self, preferredEdge: .maxY)
+        pop.show(relativeTo: rect, of: self, preferredEdge: .maxY)
         detailPopover = pop
     }
+    deinit { if let m = flagsMonitor { NSEvent.removeMonitor(m) } }
 
     // Click a checklist box (☐ / ☑) to tick it off.
     override func mouseDown(with event: NSEvent) {
@@ -2792,6 +2834,7 @@ struct RichTextEditor: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
+            if let tv = notification.object as? NSTextView { autocorrect(tv) }
             ensurePages()
             let snapshot = NSAttributedString(attributedString: textStorage)
             let url = parent.url
@@ -2799,6 +2842,47 @@ struct RichTextEditor: NSViewRepresentable {
             debounce = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
                 guard self != nil else { return }
                 Task { @MainActor in self?.parent.store.update(url: url, text: snapshot) }
+            }
+        }
+
+        // Auto-correct the word you just finished: when a word boundary is typed, ask the
+        // system speller for its SINGLE best correction and apply it (keeping your font).
+        private var isAutocorrecting = false
+        private func autocorrect(_ tv: NSTextView) {
+            guard (UserDefaults.standard.object(forKey: "autocorrect") as? Bool ?? true), !isAutocorrecting,
+                  let st = tv.textStorage else { return }
+            let caret = tv.selectedRange()
+            guard caret.length == 0, caret.location >= 2 else { return }
+            let ns = st.string as NSString
+            let boundaryIdx = caret.location - 1
+            // The last char typed must end a word.
+            guard let bscalar = UnicodeScalar(ns.character(at: boundaryIdx)),
+                  CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters).contains(bscalar) else { return }
+            // Walk back over letters to find the word.
+            var start = boundaryIdx
+            while start > 0, let s = UnicodeScalar(ns.character(at: start - 1)), CharacterSet.letters.contains(s) { start -= 1 }
+            let wordRange = NSRange(location: start, length: boundaryIdx - start)
+            guard wordRange.length >= 2 else { return }
+            let word = ns.substring(with: wordRange)
+            // Skip if it has uppercase after the first letter (likely an acronym/name).
+            if word.dropFirst().contains(where: { $0.isUppercase }) { return }
+            let checker = NSSpellChecker.shared
+            let lang = checker.language()
+            let mis = checker.checkSpelling(of: word, startingAt: 0)
+            guard mis.location != NSNotFound, mis.length == (word as NSString).length else { return }   // whole word misspelled
+            let best = checker.correction(forWordRange: NSRange(location: 0, length: (word as NSString).length),
+                                          in: word, language: lang, inSpellDocumentWithTag: 0)
+                ?? checker.guesses(forWordRange: NSRange(location: 0, length: (word as NSString).length),
+                                   in: word, language: lang, inSpellDocumentWithTag: 0)?.first
+            guard let correction = best, correction != word else { return }
+            isAutocorrecting = true
+            defer { isAutocorrecting = false }
+            if tv.shouldChangeText(in: wordRange, replacementString: correction) {
+                let attrs = st.attributes(at: wordRange.location, effectiveRange: nil)
+                st.replaceCharacters(in: wordRange, with: NSAttributedString(string: correction, attributes: attrs))
+                tv.didChangeText()
+                let delta = (correction as NSString).length - wordRange.length
+                tv.setSelectedRange(NSRange(location: caret.location + delta, length: 0))
             }
         }
         func textViewDidChangeSelection(_ notification: Notification) {
