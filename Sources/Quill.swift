@@ -638,8 +638,8 @@ final class PenwickStore: ObservableObject {
 
         reload()
         if projects.isEmpty {
-            let p = newProject(named: "My Manuscript", silent: true)
-            _ = newChapter(in: p, seed: true)
+            seedWelcomeProject()   // ship a formatted sample manuscript for new users
+            reload()
         }
         selection = nil   // start on the Home pane, not straight into a chapter
         loadOrCreateIdentity()   // account-stable identity, synced across the user's devices
@@ -821,6 +821,91 @@ final class PenwickStore: ObservableObject {
     }
 
     // Mutations
+    // The default sample manuscript shipped to brand-new users — a formatted tour
+    // of Penwick's features across five differently-styled chapters.
+    func seedWelcomeProject() {
+        let dir = root.appendingPathComponent("Welcome to Penwick", isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: dir.path) else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let ink  = NSColor(srgbRed: 0.11, green: 0.11, blue: 0.12, alpha: 1)
+        let blue = NSColor(srgbRed: 0.00, green: 0.40, blue: 0.80, alpha: 1)
+        let warm = NSColor(srgbRed: 0.62, green: 0.45, blue: 0.24, alpha: 1)
+        let green = NSColor(srgbRed: 0.16, green: 0.50, blue: 0.34, alpha: 1)
+        let fmgr = NSFontManager.shared
+        func serif(_ s: CGFloat, _ b: Bool = false) -> NSFont { NSFont(name: b ? "Georgia-Bold" : "Georgia", size: s) ?? NSFont.systemFont(ofSize: s, weight: b ? .bold : .regular) }
+        func serifI(_ s: CGFloat) -> NSFont { fmgr.convert(serif(s), toHaveTrait: .italicFontMask) }
+        func mono(_ s: CGFloat) -> NSFont { NSFont(name: "Menlo", size: s) ?? NSFont.monospacedSystemFont(ofSize: s, weight: .regular) }
+        func pp(_ a: NSTextAlignment) -> NSMutableParagraphStyle { let p = NSMutableParagraphStyle(); p.alignment = a; p.lineSpacing = 3; p.paragraphSpacing = 9; return p }
+        func r(_ t: String, _ f: NSFont, _ c: NSColor = ink, _ a: NSTextAlignment = .left, u: Bool = false, s: Bool = false) -> NSAttributedString {
+            var at: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: c, .paragraphStyle: pp(a)]
+            if u { at[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+            if s { at[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+            return NSAttributedString(string: t, attributes: at)
+        }
+        func write(_ name: String, _ parts: [NSAttributedString]) {
+            let m = NSMutableAttributedString(); parts.forEach { m.append($0) }
+            guard let data = try? m.rtf(from: NSRange(location: 0, length: m.length),
+                                        documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) else { return }
+            try? data.write(to: dir.appendingPathComponent(name))
+        }
+
+        write("01 Welcome to Penwick.rtf", [
+            r("Welcome to Penwick\n", serif(30, true), ink, .center),
+            r("Your story starts here.\n\n", serifI(18), warm, .center),
+            r("Penwick is a native Mac app for writing books and screenplays. This little sample manuscript is a tour — each chapter shows off a different feature, and each one is formatted differently so you can see what's possible.\n\n", serif(17)),
+            r("Open the next chapter from the sidebar on the left, or use the ", serif(17)),
+            r("Previous / Next", serif(17, true), blue),
+            r(" buttons at the bottom of the page.\n\n", serif(17)),
+            r("When you're ready, delete this project and start your own. Happy writing.\n", serifI(16), warm),
+        ])
+        write("02 Writing & Formatting.rtf", [
+            r("Writing & Formatting\n\n", serif(26, true), blue),
+            r("Select any text and use the bar at the top of the page. You can make it ", serif(17)),
+            r("bold", serif(17, true)), r(", ", serif(17)), r("italic", serifI(17)), r(", ", serif(17)),
+            r("underlined", serif(17), ink, .left, u: true), r(", ", serif(17)),
+            r("struck through", serif(17), ink, .left, s: true), r(", or ", serif(17)),
+            r("any colour you like", serif(17, true), blue), r(".\n\n", serif(17)),
+            r("Every font on your Mac is available, shown in its own typeface:\n", serif(17)),
+            r("•  This line is Helvetica Neue\n", NSFont(name: "Helvetica Neue", size: 16) ?? .systemFont(ofSize: 16)),
+            r("•  This line is Menlo (monospace)\n", mono(15)),
+            r("•  This line is Georgia, the classic book serif\n\n", serif(16)),
+            r("Lists continue automatically — press Return and the next item appears:\n", serif(17)),
+            r("•  First idea\n", serif(17)), r("•  Second idea\n", serif(17)), r("•  Third idea\n\n", serif(17)),
+            r("1.  Outline the chapter\n", serif(17)), r("2.  Write the messy draft\n", serif(17)), r("3.  Edit until it sings\n\n", serif(17)),
+            r("Alignment works too — this line is centered.\n", serif(17), ink, .center),
+            r("And this one is right-aligned.\n", serif(17), ink, .right),
+        ])
+        var pages: [NSAttributedString] = [
+            r("Real Pages\n\n", serif(32, true), ink, .center),
+            r("Unlike a notes app, Penwick lays your words onto real, separate pages — just like Word or Pages. As you write past the bottom of one page, a fresh sheet appears beneath it. Turn page numbers on or off from the footer, and tap a number to restyle it.\n\n", serif(17)),
+        ]
+        for i in 1...9 {
+            pages.append(r("Paragraph \(i). ", serif(17, true), blue))
+            pages.append(r("Keep typing and watch the page fill. When this paragraph runs past the bottom margin, Penwick flows the overflow onto a brand-new page automatically, and the page number in the footer follows along. Delete enough text and the empty page disappears again. This is the heart of writing long-form work that actually feels like a manuscript.\n\n", serif(17)))
+        }
+        write("03 Real Pages.rtf", pages)
+        func head(_ t: String) -> NSAttributedString { r("\(t)\n", serif(19, true), green) }
+        write("04 Tools You'll Love.rtf", [
+            r("Tools You'll Love\n\n", serif(28, true), green),
+            head("Name generator"),
+            r("Stuck on a character's name? Tools → Name Generator spins up gender-matched first names with surnames from real, per-country databases.\n\n", serif(17)),
+            head("Version history"),
+            r("Penwick quietly snapshots your drafts as you write. Open Version History to read — or restore — any earlier version.\n\n", serif(17)),
+            head("Export anywhere"),
+            r("Export to PDF, Word (.docx), Markdown, plain text, or Fountain for screenplays — ready for editors, agents, or print.\n\n", serif(17)),
+            head("Write together"),
+            r("Share a project through iCloud and write with someone else. You'll see who's here and their edits sync in.\n", serif(17)),
+        ])
+        write("05 Sharing, Safety & Updates.rtf", [
+            r("Sharing, Safety & Updates\n\n", serif(26, true), ink, .center),
+            r("Penwick keeps itself up to date — new versions install straight from the web, so you never hunt for a download.\n\n", serif(17)),
+            r("Is it safe? Yes.", serif(17, true), blue),
+            r(" The app isn't code-signed only because that costs $99 a year — not because anything's wrong. Penwick is fully open source, so anyone can read every line. Your writing lives in your own iCloud Drive as plain .rtf files. No tracking, no accounts, no servers.\n\n", serif(17)),
+            r("Now — clear out this sample and write something only you could write.\n", serifI(17), warm, .center),
+        ])
+    }
+
     @discardableResult
     func newProject(named name: String, silent: Bool = false) -> Project {
         var folder = root.appendingPathComponent(name, isDirectory: true)
