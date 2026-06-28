@@ -1624,9 +1624,13 @@ final class EditorController: ObservableObject {
     // Insert an image at the caret, scaled to fit the page width. Persists via RTFD.
     func insertImage(_ image: NSImage) {
         guard let tv = textView, let st = tv.textStorage else { return }
-        let maxW: CGFloat = RichTextEditor.pageW - 2 * RichTextEditor.margin   // page content width
+        let maxW = RichTextEditor.pageW - 2 * RichTextEditor.margin   // page content width
+        let maxH = RichTextEditor.pageH - 2 * RichTextEditor.margin   // page content height
         var size = image.size
-        if size.width > maxW, size.width > 0 { size = NSSize(width: maxW, height: size.height * (maxW / size.width)) }
+        if size.width > 0, size.height > 0 {
+            let scale = min(1, min(maxW / size.width, maxH / size.height))   // fit the page, never crop
+            size = NSSize(width: size.width * scale, height: size.height * scale)
+        }
         let att = NSTextAttachment()
         if let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
             let fw = FileWrapper(regularFileWithContents: png); fw.preferredFilename = "image.png"
@@ -1810,6 +1814,51 @@ final class PageTextView: NSTextView {
     override func becomeFirstResponder() -> Bool {
         controller?.textView = self
         return super.becomeFirstResponder()
+    }
+
+    // Right-click an image → resize options (no drag handles, but discoverable).
+    private func attachmentInfo(at pt: NSPoint) -> (NSTextAttachment, NSRange)? {
+        guard let lm = layoutManager, let tc = textContainer, let st = textStorage, st.length > 0 else { return nil }
+        let p = NSPoint(x: pt.x - textContainerOrigin.x, y: pt.y - textContainerOrigin.y)
+        var frac: CGFloat = 0
+        let gi = lm.glyphIndex(for: p, in: tc, fractionOfDistanceThroughGlyph: &frac)
+        let ci = lm.characterIndexForGlyph(at: gi)
+        guard ci < st.length, let att = st.attribute(.attachment, at: ci, effectiveRange: nil) as? NSTextAttachment else { return nil }
+        return (att, NSRange(location: ci, length: 1))
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let base = super.menu(for: event) ?? NSMenu()
+        let pt = convert(event.locationInWindow, from: nil)
+        guard let (_, range) = attachmentInfo(at: pt) else { return base }
+        let sub = NSMenu()
+        for (label, frac) in [("Small (⅓ page)", 0.33), ("Medium (½ page)", 0.5), ("Large (¾ page)", 0.75), ("Full width", 1.0)] {
+            let it = NSMenuItem(title: label, action: #selector(resizeImage(_:)), keyEquivalent: "")
+            it.target = self; it.representedObject = ["loc": range.location, "frac": frac]
+            sub.addItem(it)
+        }
+        let parent = NSMenuItem(title: "Resize Image", action: nil, keyEquivalent: "")
+        parent.submenu = sub
+        base.insertItem(parent, at: 0)
+        base.insertItem(.separator(), at: 1)
+        return base
+    }
+    @objc private func resizeImage(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: Any],
+              let loc = info["loc"] as? Int, let frac = info["frac"] as? CGFloat,
+              let st = textStorage, loc < st.length,
+              let att = st.attribute(.attachment, at: loc, effectiveRange: nil) as? NSTextAttachment else { return }
+        let img = att.image ?? (att.attachmentCell as? NSTextAttachmentCell)?.image
+        let aspect = (img != nil && img!.size.width > 0) ? img!.size.height / img!.size.width : (att.bounds.height / max(att.bounds.width, 1))
+        let maxW = RichTextEditor.pageW - 2 * RichTextEditor.margin
+        let maxH = RichTextEditor.pageH - 2 * RichTextEditor.margin
+        let w = maxW * frac
+        let h = min(w * aspect, maxH)
+        let range = NSRange(location: loc, length: 1)
+        if shouldChangeText(in: range, replacementString: nil) {
+            att.bounds = NSRect(x: 0, y: 0, width: w, height: h)
+            st.edited(.editedAttributes, range: range, changeInLength: 0)
+            didChangeText()
+        }
     }
 
     // (Reverted the custom inked cursor at the user's request — back to the
@@ -2144,9 +2193,19 @@ struct RichTextEditor: NSViewRepresentable {
             guard let lm = layoutManager, let st = textStorage else { return }
             let full = NSRange(location: 0, length: st.length)
             lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full)
+            for tv in pageViews { tv.removeAllToolTips() }   // hover shows the comment text
             for c in parent.store.comments(for: parent.url) {
-                if let r = parent.store.resolvedRange(c, in: st.string), r.length > 0, NSMaxRange(r) <= st.length {
-                    lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.32), forCharacterRange: r)
+                guard let r = parent.store.resolvedRange(c, in: st.string), r.length > 0, NSMaxRange(r) <= st.length else { continue }
+                lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.32), forCharacterRange: r)
+                let gr = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
+                let tip = "\(c.author): \(c.text)"
+                for tv in pageViews {
+                    guard let tc = tv.textContainer else { continue }
+                    let inter = NSIntersectionRange(gr, lm.glyphRange(for: tc))
+                    if inter.length == 0 { continue }
+                    let rect = lm.boundingRect(forGlyphRange: inter, in: tc)
+                        .offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)
+                    tv.addToolTip(rect, owner: tip as NSString, userData: nil)
                 }
             }
         }
@@ -2735,6 +2794,7 @@ struct EmojiPickerView: View {
 
 struct FormatBar: View {
     @EnvironmentObject var editor: EditorController
+    @EnvironmentObject var store: PenwickStore
     @Environment(\.colorScheme) var scheme
     @AppStorage("fontFamilyName") private var familyName = "New York"
     @AppStorage("fontSize") private var fontSize: Double = 17
@@ -2794,6 +2854,11 @@ struct FormatBar: View {
                   fmt("text.alignright", active: editor.selAlign == .right) { editor.setAlignment(.right) } }
             bar
             grp { fmt("list.bullet") { editor.list(numbered: false) }; fmt("list.number") { editor.list(numbered: true) } }
+            bar
+            grp {
+                fmt("photo") { penwickInsertImage(editor) }
+                fmt("bubble.left") { penwickAddComment(store, editor) }
+            }
         }
     }
 
