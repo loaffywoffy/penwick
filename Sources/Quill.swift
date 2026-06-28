@@ -910,6 +910,33 @@ final class PenwickStore: ObservableObject {
         return dirs
     }
 
+    // Real page count for a chapter — lays it out into page-sized containers (same as the editor).
+    func pageCount(for attr: NSAttributedString) -> Int {
+        guard attr.length > 0 else { return 1 }
+        let storage = NSTextStorage(attributedString: attr)
+        let lm = NSLayoutManager(); storage.addLayoutManager(lm)
+        let size = NSSize(width: RichTextEditor.pageW - 2 * RichTextEditor.margin, height: RichTextEditor.pageH - 2 * RichTextEditor.margin)
+        func add() { let c = NSTextContainer(size: size); c.lineFragmentPadding = 0; lm.addTextContainer(c) }
+        add()
+        let total = lm.numberOfGlyphs
+        let str = attr.string as NSString
+        let endsNL = str.length > 0 && str.character(at: str.length - 1) == 0x0A
+        let lineH = lm.defaultLineHeight(for: bodyNSFont()) + 2
+        var guardN = 0
+        while guardN < 4000 {
+            guardN += 1
+            guard let last = lm.textContainers.last else { break }
+            lm.ensureLayout(for: last)
+            if lm.glyphRange(for: last).upperBound < total { add(); continue }
+            var fits = true
+            if lm.extraLineFragmentTextContainer === last { fits = lm.extraLineFragmentRect.maxY <= last.size.height + 0.5 }
+            else if endsNL && lm.glyphRange(for: last).length > 0 { fits = lm.usedRect(for: last).maxY + lineH <= last.size.height + 0.5 }
+            if fits { break }
+            add()
+        }
+        return max(1, lm.textContainers.count)
+    }
+
     func loadAttributed(_ url: URL) -> NSAttributedString {
         if url.pathExtension.lowercased() == "rtf", let data = try? Data(contentsOf: url) {
             // Auto-detect RTF vs flattened RTFD (chapters with images) and keep attachments.
@@ -3363,16 +3390,26 @@ enum CharacterGen {
         return f.string(from: d)
     }
 
-    static func make(gender g: String, type t: String, nationality nat: String) -> Character {
+    // Comedy mode — silly given name + silly surname = reliably daft, near-infinite combos.
+    static let funnyFirsts = ["Bartholomew","Reginald","Mortimer","Cornelius","Englebert","Wilbur","Horace","Eugene","Percival","Archibald","Ferdinand","Thaddeus","Egbert","Norbert","Cuthbert","Humphrey","Mungo","Beauregard","Chadwick","Bartleby","Montgomery","Algernon","Bertram","Clarence","Ignatius","Leopold","Ulysses","Rupert","Granville","Phineas","Octavius","Barnaby","Wendell","Festus","Lemuel","Throckmorton"]
+    static let funnyLasts = ["Wigglesworth","Bottomley","Pumpernickel","Snodgrass","Higginbottom","Buttersworth","Dinglehopper","Fiddlesticks","Wobblebottom","Crumplehorn","Picklesworth","Nettlethorpe","Quackenbush","Bumblethorp","Wafflebottom","Snickerdoodle","Gigglesworth","Muttonchops","Cricklewood","Thistlewaite","Pennywhistle","Bogglesworth","Crumpetcake","Wimplethorpe","Fudgington","Bibblebop","Noodleman","Pinchbottom","Tiddlywink","Blunderbuss","Cobblepot","Dollophead","Flapdoodle","Gobblewonk","Pumblechook","Wickersnoot"]
+    static func funnyName() -> String { "\(funnyFirsts.randomElement()!) \(funnyLasts.randomElement()!)" }
+
+    static func make(gender g: String, type t: String, nationality nat: String, funny: Bool = false) -> Character {
         let isMale = g == "Male" ? true : (g == "Female" ? false : Bool.random())
         let genderStr = isMale ? "Male" : "Female"
         let locale = nat == "Any" ? locales.randomElement()! : (locales.first { $0.nationality == nat } ?? locales.randomElement()!)
         let place = locale.places.randomElement()!
 
-        let pool = isMale ? NameDB.maleFirstNames : NameDB.femaleFirstNames
-        let first = pool.randomElement() ?? NameDB.firstNames.randomElement() ?? fallbackFirst.randomElement()!
-        let last = NameDB.surnames(locale.surname).randomElement() ?? fallbackLast.randomElement()!
-        let name = "\(first) \(titleCased(last))"
+        let name: String
+        if funny {
+            name = funnyName()
+        } else {
+            let pool = isMale ? NameDB.maleFirstNames : NameDB.femaleFirstNames
+            let first = pool.randomElement() ?? NameDB.firstNames.randomElement() ?? fallbackFirst.randomElement()!
+            let last = NameDB.surnames(locale.surname).randomElement() ?? fallbackLast.randomElement()!
+            name = "\(first) \(titleCased(last))"
+        }
 
         let typeName = t == "Any"
             ? weighted([("Child", 6), ("Adolescent", 16), ("Young Adult", 26), ("Adult", 30), ("Middle-Aged", 14), ("Senior", 8)])
@@ -3442,6 +3479,9 @@ struct CharacterGeneratorView: View {
                 labeled("Nationality") { Picker("", selection: $nationality) { ForEach(nationalities, id: \.self) { Text($0) } }.labelsHidden().frame(width: 120) }
                 labeled("Count") { Stepper("\(count)", value: $count, in: 1...12).fixedSize() }
                 Spacer()
+                Button { generateFunny() } label: { Label("Funny", systemImage: "face.smiling") }
+                    .buttonStyle(.bordered).controlSize(.large)
+                    .help("Generate silly comedy names")
                 Button { generate() } label: { Label("Generate", systemImage: "wand.and.stars") }
                     .buttonStyle(.borderedProminent).controlSize(.large).tint(Palette.accent())
             }
@@ -3467,6 +3507,9 @@ struct CharacterGeneratorView: View {
 
     private func generate() {
         results = (0..<count).map { _ in CharacterGen.make(gender: gender, type: type, nationality: nationality) }
+    }
+    private func generateFunny() {
+        results = (0..<count).map { _ in CharacterGen.make(gender: gender, type: type, nationality: nationality, funny: true) }
     }
 
     @ViewBuilder private func labeled<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
@@ -3747,6 +3790,7 @@ struct HomeView: View {
     @Environment(\.colorScheme) var scheme
     @AppStorage("theme") private var activeTheme = "Ocean"
     @State private var quote = ""
+    @State private var totalPages = 0
 
     private let quotes = [
         "“The first draft is just you telling yourself the story.” — Terry Pratchett",
@@ -3765,7 +3809,9 @@ struct HomeView: View {
     }
     private var totalWords: Int { store.projects.reduce(0) { $0 + $1.totalWords } }
     private var chapterCount: Int { store.projects.reduce(0) { $0 + $1.chapters.count } }
-    private var estPages: Int { max(0, Int((Double(totalWords) / 300.0).rounded())) }
+    private func computePages() {
+        totalPages = store.projects.flatMap { $0.chapters }.reduce(0) { $0 + store.pageCount(for: $1.text) }
+    }
     private var greeting: String {
         let h = Calendar.current.component(.hour, from: Date())
         let part = h < 12 ? "Good morning" : (h < 18 ? "Good afternoon" : "Good evening")
@@ -3798,7 +3844,7 @@ struct HomeView: View {
                     statCard("textformat", fmt(totalWords), "words")
                     statCard("books.vertical", "\(store.projects.count)", store.projects.count == 1 ? "manuscript" : "manuscripts")
                     statCard("doc.on.doc", "\(chapterCount)", chapterCount == 1 ? "chapter" : "chapters")
-                    statCard("doc.richtext", "~\(fmt(estPages))", estPages == 1 ? "page" : "pages")
+                    statCard("doc.richtext", "\(fmt(totalPages))", totalPages == 1 ? "page" : "pages")
                 }
 
                 if !store.projects.isEmpty {
@@ -3848,7 +3894,8 @@ struct HomeView: View {
             .padding(.horizontal, 40)
         }
         .background(Palette.surround(scheme).ignoresSafeArea())
-        .onAppear { if quote.isEmpty { quote = quotes.randomElement() ?? quotes[0] } }
+        .onAppear { if quote.isEmpty { quote = quotes.randomElement() ?? quotes[0] }; computePages() }
+        .onChange(of: totalWords) { _, _ in computePages() }
     }
 
     private func post(_ n: Notification.Name) { NotificationCenter.default.post(name: n, object: nil) }
