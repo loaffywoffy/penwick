@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Fonts & helpers
 
@@ -926,6 +927,36 @@ final class PenwickStore: ObservableObject {
         if let data = try? JSONSerialization.data(withJSONObject: j) { try? data.write(to: file) }
     }
 
+    // MARK: Importing dropped files
+    static let importableExtensions = ["md","markdown","txt","text","rtf","rtfd","fountain","doc","docx","odt","html","htm","webarchive","pages"]
+    func isImportable(_ url: URL) -> Bool { Self.importableExtensions.contains(url.pathExtension.lowercased()) }
+
+    func attributedFromFile(_ url: URL) -> NSAttributedString? {
+        let ext = url.pathExtension.lowercased()
+        let rich = ["rtf","rtfd","doc","docx","odt","html","htm","webarchive"]
+        if rich.contains(ext), let a = try? NSAttributedString(url: url, options: [:], documentAttributes: nil) { return a }
+        if let s = try? String(contentsOf: url, encoding: .utf8) {
+            return NSAttributedString(string: s, attributes: [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: defaultParagraphStyle()])
+        }
+        return nil
+    }
+
+    // Add a dropped file as its own chapter in a project.
+    @discardableResult func importChapter(from url: URL, into project: Project) -> URL? {
+        guard let attr = attributedFromFile(url) else { return nil }
+        let existing = (try? FileManager.default.contentsOfDirectory(at: project.url, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension.lowercased() == "rtf" } ?? []
+        let n = existing.count + 1
+        let base = url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "/", with: "-")
+        let name = String(format: "%02d %@.rtf", n, base)
+        let dest = project.url.appendingPathComponent(name)
+        guard let data = try? attr.rtf(from: NSRange(location: 0, length: attr.length),
+                                       documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) else { return nil }
+        try? data.write(to: dest)
+        reload()
+        return projects.first { $0.url == project.url }?.chapters.first { $0.url.lastPathComponent == name }?.url
+    }
+
     // Lookups
     func chapter(_ url: URL) -> Chapter? { projects.flatMap { $0.chapters }.first { $0.url == url } }
     func attributed(for url: URL) -> NSAttributedString { chapter(url)?.text ?? NSAttributedString(string: "") }
@@ -1057,6 +1088,35 @@ final class PenwickStore: ObservableObject {
             r(" The app isn't code-signed only because that costs $99 a year — not because anything's wrong. Penwick is fully open source, so anyone can read every line. Your writing lives in your own iCloud Drive as plain .rtf files. No tracking, no accounts, no servers.\n\n", serif(17)),
             r("Now — clear out this sample and write something only you could write.\n", serifI(17), warm, .center),
         ])
+        write("06 Personal Touches.rtf", [
+            r("Personal Touches\n\n", serif(28, true), warm),
+            head("Give it an emoji"),
+            r("See the little icons next to the chapters in the sidebar? Right-click any ", serif(17)),
+            r("chapter — or the manuscript title itself", serif(17, true), blue),
+            r(" — and choose ", serif(17)),
+            r("Set Emoji…", serif(17, true)),
+            r(" to tag it. Pick one that captures the mood; it shows up right beside the name.\n\n", serif(17)),
+            head("Bring in old writing"),
+            r("Already started somewhere else? Just ", serif(17)),
+            r("drag a file onto Penwick", serif(17, true), blue),
+            r(" — Markdown (.md), plain text (.txt), Word (.docx), RTF, or Fountain. Penwick asks whether to drop it in as a ", serif(17)),
+            r("new chapter", serif(17, true)),
+            r(" or add it to the ", serif(17)),
+            r("chapter you're in", serif(17, true)),
+            r(". Your old drafts, home in one place.\n", serif(17)),
+        ])
+
+        // Default emoji tags — also demonstrates the feature.
+        let tags = ["__project__": "📖",
+                    "01 Welcome to Penwick.rtf": "👋",
+                    "02 Writing & Formatting.rtf": "✍️",
+                    "03 Real Pages.rtf": "📄",
+                    "04 Tools You'll Love.rtf": "🧰",
+                    "05 Sharing, Safety & Updates.rtf": "🔒",
+                    "06 Personal Touches.rtf": "🎨"]
+        if let data = try? JSONSerialization.data(withJSONObject: tags) {
+            try? data.write(to: dir.appendingPathComponent(".penwick/emoji.json"))
+        }
     }
 
     @discardableResult
@@ -1431,6 +1491,19 @@ final class EditorController: ObservableObject {
         // deleted, the next characters typed keep the font you just chose.
         let cur = (tv.typingAttributes[.font] as? NSFont) ?? bodyNSFont()
         tv.typingAttributes[.font] = transform(cur)
+    }
+
+    // Append imported content to the end of the open chapter (undoable, live).
+    func appendAtEnd(_ attr: NSAttributedString) {
+        guard let tv = textView, let st = tv.textStorage else { return }
+        let ins = NSMutableAttributedString(string: "\n\n", attributes: [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: defaultParagraphStyle()])
+        ins.append(attr)
+        let end = NSRange(location: st.length, length: 0)
+        if tv.shouldChangeText(in: end, replacementString: ins.string) {
+            st.replaceCharacters(in: end, with: ins); tv.didChangeText()
+            tv.setSelectedRange(NSRange(location: st.length, length: 0))
+            tv.scrollRangeToVisible(NSRange(location: st.length, length: 0))
+        }
     }
 
     // The font that the next keystroke / selection currently uses.
@@ -2270,6 +2343,7 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickExport)) { _ in penwickExport(store, editor) }
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickCollaborate)) { _ in showCollab = true }
         .modifier(JoinRequestPrompt(store: store, joinReq: $joinReq))
+        .modifier(DropImport(store: store, editor: editor))
         .animation(.easeInOut(duration: 0.18), value: showGenerator)
         .animation(.easeInOut(duration: 0.18), value: showHistory)
         .animation(.easeInOut(duration: 0.18), value: showSettings)
@@ -3057,6 +3131,54 @@ struct CharacterCard: View {
 
 // The home pane — lives inside the normal split view (sidebar stays visible),
 // uses the editor's own surface/accent, and scrolls. Shown when no chapter is open.
+// Drag a compatible file onto the window → choose new chapter vs. current chapter.
+struct DropImport: ViewModifier {
+    @ObservedObject var store: PenwickStore
+    let editor: EditorController
+    @State private var dropped: [URL] = []
+    @State private var ask = false
+
+    func body(content: Content) -> some View {
+        content
+            .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in loadDrop(providers); return true }
+            .confirmationDialog(promptTitle, isPresented: $ask, titleVisibility: .visible) {
+                Button("Add as new chapter\(dropped.count > 1 ? "s" : "")") { importNew() }
+                if store.selectedChapter != nil { Button("Add to the current chapter") { importCurrent() } }
+                Button("Cancel", role: .cancel) { dropped = [] }
+            } message: { Text("Where should Penwick put the content?") }
+    }
+    private var promptTitle: String {
+        dropped.count == 1 ? "Add “\(dropped.first?.lastPathComponent ?? "")”" : "Add \(dropped.count) files"
+    }
+    private func loadDrop(_ providers: [NSItemProvider]) {
+        let group = DispatchGroup()
+        var urls: [URL] = []
+        let lock = NSLock()
+        for p in providers {
+            group.enter()
+            p.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                var u: URL?
+                if let d = item as? Data { u = URL(dataRepresentation: d, relativeTo: nil) }
+                else if let url = item as? URL { u = url }
+                if let u, store.isImportable(u) { lock.lock(); urls.append(u); lock.unlock() }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { if !urls.isEmpty { dropped = urls; ask = true } }
+    }
+    private func importNew() {
+        guard let proj = store.currentProject else { dropped = []; return }
+        var last: URL?
+        for u in dropped { last = store.importChapter(from: u, into: proj) ?? last }
+        if let l = last { store.selection = l }
+        dropped = []
+    }
+    private func importCurrent() {
+        for u in dropped { if let a = store.attributedFromFile(u) { editor.appendAtEnd(a) } }
+        dropped = []
+    }
+}
+
 // Host-side "X wants to join" Approve/Deny prompt (extracted so ContentView.body stays light).
 struct JoinRequestPrompt: ViewModifier {
     @ObservedObject var store: PenwickStore
