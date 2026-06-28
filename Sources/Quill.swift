@@ -1114,6 +1114,7 @@ final class PenwickStore: ObservableObject {
                     "04 Tools You'll Love.rtf": "🧰",
                     "05 Sharing, Safety & Updates.rtf": "🔒",
                     "06 Personal Touches.rtf": "🎨"]
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent(".penwick", isDirectory: true), withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: tags) {
             try? data.write(to: dir.appendingPathComponent(".penwick/emoji.json"))
         }
