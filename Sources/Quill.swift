@@ -60,20 +60,12 @@ struct Theme: Identifiable {
 }
 
 enum Palette {
+    // One theme only — Ocean (Apple Action Blue #0066cc).
     static let themes: [Theme] = [
-        Theme(name: "Indigo",   accent: (0.36, 0.42, 0.95), paperLight: nil),
-        Theme(name: "Graphite", accent: (0.40, 0.44, 0.52), paperLight: nil),
-        Theme(name: "Sepia",    accent: (0.62, 0.45, 0.24), paperLight: (0.98, 0.96, 0.90)),
-        Theme(name: "Forest",   accent: (0.20, 0.55, 0.38), paperLight: nil),
-        Theme(name: "Crimson",  accent: (0.80, 0.27, 0.34), paperLight: nil),
-        Theme(name: "Ocean",    accent: (0.0, 0.40, 0.80), paperLight: nil),   // Apple Action Blue #0066cc
-        Theme(name: "Plum",     accent: (0.56, 0.30, 0.72), paperLight: nil),
+        Theme(name: "Ocean", accent: (0.0, 0.40, 0.80), paperLight: nil),
     ]
 
-    static var current: Theme {
-        let name = UserDefaults.standard.string(forKey: "theme") ?? "Ocean"
-        return themes.first { $0.name == name } ?? themes[0]
-    }
+    static var current: Theme { themes[0] }
 
     static func accent() -> Color { let a = current.accent; return Color(red: a.0, green: a.1, blue: a.2) }
     static func accentDark() -> Color { let a = current.accent; return Color(red: a.0 * 0.74, green: a.1 * 0.74, blue: a.2 * 0.80) }
@@ -410,6 +402,26 @@ enum AIClient {
     }
     static var isConfigured: Bool { provider != .off && (!provider.needsKey || !key.isEmpty) }
 
+    // Installed Ollama models (nil = couldn't reach Ollama; [] = running but empty).
+    static func ollamaModels() async -> [String]? {
+        guard let url = URL(string: "\(ollamaURL)/api/tags") else { return nil }
+        var r = URLRequest(url: url); r.timeoutInterval = 4
+        guard let (data, resp) = try? await URLSession.shared.data(for: r),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = j["models"] as? [[String: Any]] else { return nil }
+        return arr.compactMap { $0["name"] as? String }
+    }
+    // Is the Ollama CLI/app installed on this Mac?
+    static var ollamaInstalled: Bool {
+        ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app"].contains { FileManager.default.fileExists(atPath: $0) }
+    }
+    // Launch the Ollama app (which starts its local server).
+    @discardableResult static func startOllamaApp() -> Bool {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-ga", "Ollama"]
+        do { try p.run(); return true } catch { return false }
+    }
+
     enum AIError: LocalizedError { case notConfigured, badResponse(String)
         var errorDescription: String? {
             switch self { case .notConfigured: return "No AI is linked. Open Settings → AI."
@@ -495,6 +507,31 @@ struct SettingsView: View {
             }
         }
     }
+    // Auto-set-up Ollama: detect models, launch the app if needed, pick a model for you.
+    private func setupOllama() {
+        aiTesting = true; aiTestResult = ""
+        Task {
+            func finish(_ models: [String]) {
+                if aiModel.isEmpty { aiModel = models[0] }
+                aiTestResult = "Connected — using \(aiModel)"; aiTesting = false
+            }
+            if let m = await AIClient.ollamaModels() {
+                if m.isEmpty { await MainActor.run { aiTestResult = "Ollama is running but has no models. In Terminal run:  ollama pull llama3.2"; aiTesting = false } }
+                else { await MainActor.run { finish(m) } }
+                return
+            }
+            // Not reachable — try to launch the Ollama app, then retry.
+            if AIClient.ollamaInstalled {
+                await MainActor.run { aiTestResult = "Starting Ollama…" }
+                AIClient.startOllamaApp()
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if let m = await AIClient.ollamaModels(), !m.isEmpty { await MainActor.run { finish(m) }; return }
+                await MainActor.run { aiTestResult = "Ollama started but has no models yet. Run:  ollama pull llama3.2"; aiTesting = false }
+            } else {
+                await MainActor.run { aiTestResult = "Ollama isn't installed. Get it free at ollama.com, then click again."; aiTesting = false }
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -520,13 +557,14 @@ struct SettingsView: View {
                     Picker("Appearance", selection: $appearance) {
                         Text("System").tag("auto"); Text("Light").tag("light"); Text("Dark").tag("dark")
                     }
-                    Picker("Color theme", selection: $theme) {
-                        ForEach(Palette.themes) { Text($0.name).tag($0.name) }
-                    }
                 }
                 Section("AI assistant") {
                     Picker("Provider", selection: $aiProvider) {
                         ForEach(AIProvider.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                    .onChange(of: aiProvider) { _, new in
+                        aiTestResult = ""
+                        if new == AIProvider.ollama.rawValue { setupOllama() }   // auto set up on select
                     }
                     if aiProvider != "Off" {
                         if AIProvider(rawValue: aiProvider)?.needsKey == true {
@@ -538,12 +576,16 @@ struct SettingsView: View {
                             TextField("Ollama URL", text: $aiOllamaURL, prompt: Text("http://localhost:11434"))
                         }
                         HStack {
-                            Button(aiTesting ? "Testing…" : "Test connection") { testAI() }.disabled(aiTesting)
+                            if aiProvider == AIProvider.ollama.rawValue {
+                                Button(aiTesting ? "Setting up…" : "Auto set up") { setupOllama() }.disabled(aiTesting)
+                            } else {
+                                Button(aiTesting ? "Testing…" : "Test connection") { testAI() }.disabled(aiTesting)
+                            }
                             if !aiTestResult.isEmpty {
-                                Text(aiTestResult).font(.caption).foregroundStyle(aiTestResult == "Connected" ? .green : .red)
+                                Text(aiTestResult).font(.caption).foregroundStyle(aiTestResult.hasPrefix("Connected") ? .green : .secondary)
                             }
                         }
-                        Text("Use your own API key, or run a free local model with Ollama. A Claude.ai or ChatGPT Plus subscription can't be used here — those don't include API access; the API is billed separately.")
+                        Text("Use your own API key, or run a free local model with Ollama (it sets itself up here). A Claude.ai or ChatGPT Plus subscription can't be used — those don't include API access; the API is billed separately.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -2795,17 +2837,13 @@ struct ContentView: View {
                 .help("Add")
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                // Appearance & theme — one labelled menu.
+                // Appearance (light / dark / system).
                 Menu {
                     Picker("Appearance", selection: $appearance) {
                         Text("System").tag("auto"); Text("Light").tag("light"); Text("Dark").tag("dark")
                     }.pickerStyle(.inline)
-                    Divider()
-                    Picker("Color Theme", selection: $theme) {
-                        ForEach(Palette.themes) { t in Text(t.name).tag(t.name) }
-                    }.pickerStyle(.inline)
-                } label: { Label("Appearance", systemImage: "paintpalette") }
-                .help("Appearance & color theme")
+                } label: { Label("Appearance", systemImage: appearanceIcon) }
+                .help("Appearance")
 
                 // Focus mode — hide everything but the page.
                 Button { focusMode.toggle() } label: {
@@ -3835,6 +3873,19 @@ struct CommentsView: View {
     }
 }
 
+// Subtle lift on hover — used on Home cards/buttons to make the app feel alive.
+struct HoverScale: ViewModifier {
+    var scale: CGFloat = 1.025
+    @State private var hovering = false
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(hovering ? scale : 1)
+            .animation(.spring(response: 0.28, dampingFraction: 0.7), value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+extension View { func hoverScale(_ s: CGFloat = 1.025) -> some View { modifier(HoverScale(scale: s)) } }
+
 // Collaborate via a memorable 3-word room code.
 struct CollaborateView: View {
     @ObservedObject var store: PenwickStore
@@ -3932,6 +3983,7 @@ struct HomeView: View {
     @AppStorage("theme") private var activeTheme = "Ocean"
     @State private var quote = ""
     @State private var totalPages = 0
+    @State private var appeared = false
 
     private let quotes = [
         "“The first draft is just you telling yourself the story.” — Terry Pratchett",
@@ -4033,9 +4085,16 @@ struct HomeView: View {
             .frame(maxWidth: 880, alignment: .leading)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 40)
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 12)
         }
         .background(Palette.surround(scheme).ignoresSafeArea())
-        .onAppear { if quote.isEmpty { quote = quotes.randomElement() ?? quotes[0] }; computePages() }
+        .onAppear {
+            if quote.isEmpty { quote = quotes.randomElement() ?? quotes[0] }
+            computePages()
+            appeared = false
+            withAnimation(.easeOut(duration: 0.4)) { appeared = true }
+        }
         .onChange(of: totalWords) { _, _ in computePages() }
     }
 
@@ -4055,7 +4114,7 @@ struct HomeView: View {
                 .background(Capsule().fill(filled ? Palette.accent() : Color.clear))
                 .overlay(Capsule().strokeBorder(Palette.accent(), lineWidth: filled ? 0 : 1))
         }
-        .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
+        .buttonStyle(.plain).hoverScale().onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 
     private func statCard(_ icon: String, _ value: String, _ label: String) -> some View {
@@ -4086,7 +4145,7 @@ struct HomeView: View {
             .background(RoundedRectangle(cornerRadius: 18).fill(Palette.paper(scheme)))
             .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.primary.opacity(0.08)))
         }
-        .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
+        .buttonStyle(.plain).hoverScale().onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 
     private func recentRow(_ ch: Chapter) -> some View {
@@ -4105,7 +4164,7 @@ struct HomeView: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(Palette.paper(scheme)))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08)))
         }
-        .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
+        .buttonStyle(.plain).hoverScale().onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 
     private func toolTile(_ icon: String, _ title: String, _ subtitle: String, _ action: @escaping () -> Void) -> some View {
@@ -4122,7 +4181,7 @@ struct HomeView: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(Palette.paper(scheme)))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08)))
         }
-        .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
+        .buttonStyle(.plain).hoverScale().onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 
     // First few words of a title (so a giant pasted blob doesn't fill the card).
