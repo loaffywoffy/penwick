@@ -1794,8 +1794,27 @@ final class EditorController: ObservableObject {
         let firstLen = (rebuilt.first.map { $0 as NSString })?.length ?? 0
         tv.setSelectedRange(NSRange(location: para.location + firstLen, length: 0))
     }
+    // Checklist: prefix each selected line with an empty checkbox (click it to tick).
+    func checklist() {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        let ns = storage.string as NSString
+        let para = ns.paragraphRange(for: tv.selectedRange())
+        let block = ns.substring(with: para)
+        let endsWithNewline = block.hasSuffix("\n")
+        var lines = block.components(separatedBy: "\n")
+        if endsWithNewline { lines.removeLast() }
+        if lines.isEmpty { lines = [""] }
+        let rebuilt = lines.map { "☐  " + strip($0) }
+        var joined = rebuilt.joined(separator: "\n"); if endsWithNewline { joined += "\n" }
+        let style = NSMutableParagraphStyle(); style.headIndent = 22; style.paragraphSpacing = 2
+        let attrs: [NSAttributedString.Key: Any] = [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: style]
+        textEdit(para, replacement: NSAttributedString(string: joined, attributes: attrs))
+        let firstLen = (rebuilt.first.map { $0 as NSString })?.length ?? 0
+        tv.setSelectedRange(NSRange(location: para.location + firstLen, length: 0))
+    }
     private func strip(_ line: String) -> String {
         var t = line
+        if let r = t.range(of: #"^\s*[☐☑]\s+"#, options: .regularExpression) { t.removeSubrange(r); return t }
         if let r = t.range(of: #"^\s*•\s+"#, options: .regularExpression) { t.removeSubrange(r); return t }
         if let r = t.range(of: #"^\s*\d+\.\s+"#, options: .regularExpression) { t.removeSubrange(r); return t }
         return t
@@ -1814,6 +1833,37 @@ final class PageTextView: NSTextView {
     override func becomeFirstResponder() -> Bool {
         controller?.textView = self
         return super.becomeFirstResponder()
+    }
+
+    // Click a checklist box (☐ / ☑) to tick it off.
+    override func mouseDown(with event: NSEvent) {
+        if toggleCheckboxIfHit(at: convert(event.locationInWindow, from: nil)) { return }
+        super.mouseDown(with: event)
+    }
+    private func toggleCheckboxIfHit(at pt: NSPoint) -> Bool {
+        guard let lm = layoutManager, let tc = textContainer, let st = textStorage, st.length > 0 else { return false }
+        let p = NSPoint(x: pt.x - textContainerOrigin.x, y: pt.y - textContainerOrigin.y)
+        var frac: CGFloat = 0
+        let gi = lm.glyphIndex(for: p, in: tc, fractionOfDistanceThroughGlyph: &frac)
+        let ci = lm.characterIndexForGlyph(at: gi)
+        let ns = st.string as NSString
+        let line = ns.lineRange(for: NSRange(location: min(ci, ns.length - 1), length: 0))
+        guard line.length > 0 else { return false }
+        let first = ns.substring(with: NSRange(location: line.location, length: 1))
+        guard (first == "☐" || first == "☑"), ci <= line.location + 2 else { return false }   // clicked on/near the box
+        let newChar = first == "☐" ? "☑" : "☐"
+        let boxRange = NSRange(location: line.location, length: 1)
+        guard shouldChangeText(in: boxRange, replacementString: newChar) else { return false }
+        let attrs = st.attributes(at: line.location, effectiveRange: nil)
+        st.replaceCharacters(in: boxRange, with: NSAttributedString(string: newChar, attributes: attrs))
+        // Strike + dim the item text when checked.
+        let hasNL = ns.substring(with: line).hasSuffix("\n")
+        let textRange = NSRange(location: line.location, length: line.length - (hasNL ? 1 : 0))
+        let checked = newChar == "☑"
+        st.addAttribute(.strikethroughStyle, value: checked ? NSUnderlineStyle.single.rawValue : 0, range: textRange)
+        st.addAttribute(.foregroundColor, value: checked ? NSColor(white: 0.55, alpha: 1) : NSColor(white: 0.12, alpha: 1), range: textRange)
+        didChangeText()
+        return true
     }
 
     // Right-click an image → resize options (no drag handles, but discoverable).
@@ -2333,6 +2383,11 @@ struct RichTextEditor: NSViewRepresentable {
                 if rest.trimmingCharacters(in: .whitespaces).isEmpty { deleteMarker(3) } else { insert("\n•  ") }
                 return true
             }
+            if line.hasPrefix("☐  ") || line.hasPrefix("☑  ") {
+                let rest = String(line.dropFirst(3))
+                if rest.trimmingCharacters(in: .whitespaces).isEmpty { deleteMarker(3) } else { insert("\n☐  ") }
+                return true
+            }
             let digits = line.prefix { $0.isNumber }
             if !digits.isEmpty {
                 let after = line.dropFirst(digits.count)
@@ -2397,6 +2452,7 @@ struct PenwickApp: App {
                 Divider()
                 Button("Bullet List") { editor.list(numbered: false) }.keyboardShortcut("8", modifiers: [.command, .shift])
                 Button("Numbered List") { editor.list(numbered: true) }.keyboardShortcut("7", modifiers: [.command, .shift])
+                Button("Checklist") { editor.checklist() }.keyboardShortcut("9", modifiers: [.command, .shift])
             }
             CommandMenu("Chapter") {
                 Button("Previous Chapter") { store.goChapter(-1) }
@@ -2853,7 +2909,7 @@ struct FormatBar: View {
                   fmt("text.aligncenter", active: editor.selAlign == .center) { editor.setAlignment(.center) }
                   fmt("text.alignright", active: editor.selAlign == .right) { editor.setAlignment(.right) } }
             bar
-            grp { fmt("list.bullet") { editor.list(numbered: false) }; fmt("list.number") { editor.list(numbered: true) } }
+            grp { fmt("list.bullet") { editor.list(numbered: false) }; fmt("list.number") { editor.list(numbered: true) }; fmt("checklist") { editor.checklist() } }
             bar
             grp {
                 fmt("photo") { penwickInsertImage(editor) }
