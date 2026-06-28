@@ -288,6 +288,17 @@ final class ExportActions: NSObject {
     }
 }
 
+@MainActor func penwickInsertImage(_ editor: EditorController) {
+    let panel = NSOpenPanel()
+    panel.title = "Insert Image"
+    panel.allowedContentTypes = [.png, .jpeg, .gif, .tiff, .heic, .bmp, .image]
+    panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+    panel.begin { resp in
+        guard resp == .OK, let url = panel.url, let img = NSImage(contentsOf: url) else { return }
+        MainActor.assumeIsolated { editor.insertImage(img) }
+    }
+}
+
 @MainActor func penwickSetName(_ store: PenwickStore) {
     let alert = NSAlert()
     alert.messageText = "Your Name"
@@ -867,9 +878,11 @@ final class PenwickStore: ObservableObject {
     }
 
     func loadAttributed(_ url: URL) -> NSAttributedString {
-        if url.pathExtension.lowercased() == "rtf",
-           let data = try? Data(contentsOf: url),
-           let a = NSAttributedString(rtf: data, documentAttributes: nil) { return a }
+        if url.pathExtension.lowercased() == "rtf", let data = try? Data(contentsOf: url) {
+            // Auto-detect RTF vs flattened RTFD (chapters with images) and keep attachments.
+            if let a = try? NSAttributedString(data: data, options: [:], documentAttributes: nil) { return a }
+            if let a = NSAttributedString(rtf: data, documentAttributes: nil) { return a }
+        }
         let s = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         return NSAttributedString(string: s, attributes: [.font: bodyNSFont(), .foregroundColor: NSColor.labelColor])
     }
@@ -1255,7 +1268,12 @@ final class PenwickStore: ObservableObject {
         }
     }
     func save(url: URL, text: NSAttributedString) {
-        if let data = text.rtf(from: NSRange(location: 0, length: text.length), documentAttributes: [:]) {
+        let full = NSRange(location: 0, length: text.length)
+        // If the chapter has images, persist as flattened RTFD (RTF drops attachments).
+        let data: Data? = text.containsAttachments(in: full)
+            ? text.rtfd(from: full, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
+            : text.rtf(from: full, documentAttributes: [:])
+        if let data = data {
             try? data.write(to: url)
             lastSignature = folderSignature()   // our own write isn't an "external" change
             snapshotIfNeeded(url: url, text: text)
@@ -1504,6 +1522,29 @@ final class EditorController: ObservableObject {
             st.replaceCharacters(in: end, with: ins); tv.didChangeText()
             tv.setSelectedRange(NSRange(location: st.length, length: 0))
             tv.scrollRangeToVisible(NSRange(location: st.length, length: 0))
+        }
+    }
+
+    // Insert an image at the caret, scaled to fit the page width. Persists via RTFD.
+    func insertImage(_ image: NSImage) {
+        guard let tv = textView, let st = tv.textStorage else { return }
+        let maxW: CGFloat = RichTextEditor.pageW - 2 * RichTextEditor.margin   // page content width
+        var size = image.size
+        if size.width > maxW, size.width > 0 { size = NSSize(width: maxW, height: size.height * (maxW / size.width)) }
+        let att = NSTextAttachment()
+        if let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            let fw = FileWrapper(regularFileWithContents: png); fw.preferredFilename = "image.png"
+            att.fileWrapper = fw   // ensures the image survives RTFD save/load
+        }
+        att.image = image
+        att.bounds = NSRect(origin: .zero, size: size)
+        let ins = NSMutableAttributedString(string: "\n")
+        ins.append(NSAttributedString(attachment: att))
+        ins.append(NSAttributedString(string: "\n"))
+        let caret = tv.selectedRange()
+        if tv.shouldChangeText(in: caret, replacementString: ins.string) {
+            st.replaceCharacters(in: caret, with: ins); tv.didChangeText()
+            tv.setSelectedRange(NSRange(location: caret.location + ins.length, length: 0))
         }
     }
 
@@ -1874,6 +1915,7 @@ struct RichTextEditor: NSViewRepresentable {
             // colours (labelColor etc. resolve dark) — even when the app is in dark mode.
             tv.appearance = NSAppearance(named: .aqua)
             tv.isRichText = true; tv.allowsUndo = true; tv.delegate = self
+            tv.importsGraphics = true; tv.allowsImageEditing = true   // paste/drag images
             tv.isContinuousSpellCheckingEnabled = true; tv.isGrammarCheckingEnabled = true
             tv.isAutomaticSpellingCorrectionEnabled = false
             tv.isAutomaticQuoteSubstitutionEnabled = true; tv.isAutomaticDashSubstitutionEnabled = true
@@ -2274,6 +2316,7 @@ struct ContentView: View {
 
                 // Tools.
                 Menu {
+                    Button("Insert Image…") { penwickInsertImage(editor) }.disabled(store.selectedChapter == nil)
                     Button("Name Generator…") { showGenerator = true }
                     Button("Version History…") { showHistory = true }.disabled(store.selectedChapter == nil)
                     Button("Show Files in Finder") { store.revealRoot() }
