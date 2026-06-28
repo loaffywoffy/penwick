@@ -1043,12 +1043,20 @@ final class PenwickStore: ObservableObject {
     private func roomFile(_ p: Project) -> URL { p.url.appendingPathComponent(".penwick/room.json") }
     private func canonCode(_ s: String) -> String { String(s.uppercased().filter { $0 >= "A" && $0 <= "Z" }) }
 
-    func roomCode(for p: Project) -> String? {
+    struct RoomInfo { var code: String; var expiresAt: Double; var open: Bool
+        var expired: Bool { Date().timeIntervalSince1970 > expiresAt }
+        var active: Bool { open && !expired }
+    }
+    static let roomCodeTTL: Double = 300   // codes expire after 5 minutes
+
+    func roomInfo(for p: Project) -> RoomInfo? {
         guard let d = try? Data(contentsOf: roomFile(p)),
               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let c = j["code"] as? String else { return nil }
-        return c
+        return RoomInfo(code: c, expiresAt: (j["expiresAt"] as? Double) ?? 0, open: (j["open"] as? Bool) ?? false)
     }
+    func roomCode(for p: Project) -> String? { roomInfo(for: p)?.code }
+
     @discardableResult func ensureRoomCode(for p: Project) -> String {
         roomCode(for: p) ?? regenerateRoomCode(for: p)
     }
@@ -1056,10 +1064,20 @@ final class PenwickStore: ObservableObject {
         var picks: [String] = []
         while picks.count < 3 { let w = Self.roomWords.randomElement() ?? "pen"; if !picks.contains(w) { picks.append(w) } }
         let code = picks.map { $0.uppercased() }.joined(separator: "-")
+        writeRoom(p, code: code, expiresAt: Date().timeIntervalSince1970 + Self.roomCodeTTL, open: true)
+        return code
+    }
+    func setRoomOpen(_ open: Bool, for p: Project) {
+        let info = roomInfo(for: p)
+        writeRoom(p, code: info?.code ?? ensureRoomCode(for: p),
+                  expiresAt: info?.expiresAt ?? (Date().timeIntervalSince1970 + Self.roomCodeTTL), open: open)
+    }
+    private func writeRoom(_ p: Project, code: String, expiresAt: Double, open: Bool) {
         let dir = p.url.appendingPathComponent(".penwick", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if let data = try? JSONSerialization.data(withJSONObject: ["code": code]) { try? data.write(to: roomFile(p)) }
-        return code
+        if let data = try? JSONSerialization.data(withJSONObject: ["code": code, "expiresAt": expiresAt, "open": open]) {
+            try? data.write(to: roomFile(p))
+        }
     }
 
     // Find the project folder whose room code matches. Scans linked projects plus the
@@ -1079,6 +1097,10 @@ final class PenwickStore: ObservableObject {
             guard let d = try? Data(contentsOf: url.appendingPathComponent(".penwick/room.json")),
                   let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                   let c = j["code"] as? String, canonCode(c) == target else { continue }
+            // Only join if the host is accepting and the code hasn't expired (5 min).
+            let open = (j["open"] as? Bool) ?? false
+            let exp = (j["expiresAt"] as? Double) ?? 0
+            guard open, Date().timeIntervalSince1970 <= exp else { return nil }
             return url
         }
         return nil
@@ -4118,6 +4140,16 @@ struct CollaborateView: View {
     @State private var joinMsg = ""
     @State private var waiting = false
     @State private var pendingURL: URL?
+    @State private var accepting = false
+    @State private var expiresAt: Double = 0
+    @State private var now = Date().timeIntervalSince1970
+
+    private var remaining: Int { max(0, Int(expiresAt - now)) }
+    private var active: Bool { accepting && remaining > 0 }
+    private func refreshRoom(_ p: Project) {
+        if let info = store.roomInfo(for: p) { code = info.code; expiresAt = info.expiresAt; accepting = info.open }
+        else { code = store.ensureRoomCode(for: p); if let i = store.roomInfo(for: p) { expiresAt = i.expiresAt; accepting = i.open } }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -4132,16 +4164,31 @@ struct CollaborateView: View {
 
             if let proj = store.currentProject {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("YOUR ROOM CODE").font(.system(size: 10, weight: .bold)).tracking(1).foregroundStyle(.secondary)
-                    Text(code).font(.system(size: 30, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(Palette.accent())
-                    Text("for “\(proj.name)”").font(.system(size: 12)).foregroundStyle(.secondary)
-                    HStack(spacing: 10) {
-                        capsule("Invite people…", filled: true) { penwickCollaborate(store) }
-                        capsule("Copy", filled: false) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string) }
-                        capsule("New code", filled: false) { code = store.regenerateRoomCode(for: proj) }
+                    Toggle(isOn: Binding(get: { accepting }, set: { accepting = $0; store.setRoomOpen($0, for: proj); refreshRoom(proj) })) {
+                        Text("Accepting collaborators").font(.system(size: 13, weight: .medium))
+                    }.toggleStyle(.switch)
+
+                    if accepting {
+                        Text("YOUR ROOM CODE").font(.system(size: 10, weight: .bold)).tracking(1).foregroundStyle(.secondary)
+                        Text(code).font(.system(size: 30, weight: .bold, design: .monospaced)).tracking(2)
+                            .foregroundStyle(active ? Palette.accent() : .secondary)
+                        if remaining > 0 {
+                            Text("Expires in \(remaining / 60):\(String(format: "%02d", remaining % 60)) · for “\(proj.name)”")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        } else {
+                            Text("Code expired — tap New code to reopen.").font(.system(size: 11)).foregroundStyle(.orange)
+                        }
+                        HStack(spacing: 10) {
+                            capsule("Give iCloud access…", filled: true) { penwickCollaborate(store) }
+                            capsule("Copy", filled: false) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string) }
+                            capsule("New code", filled: false) { code = store.regenerateRoomCode(for: proj); refreshRoom(proj) }
+                        }
+                        Text("“Give iCloud access” shares this project's iCloud folder so your collaborator's Mac can reach it — that's how they get in. Then they type the code (good for 5 min) and you approve them.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("Turn this on when someone's about to join. The code stays off until then.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
-                    Text("Tap Invite people to send the iCloud invite, then tell your collaborator this code. They type it below to jump straight into the same project.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(14)
                 .background(RoundedRectangle(cornerRadius: 14).fill(Palette.paper(scheme)))
@@ -4167,8 +4214,8 @@ struct CollaborateView: View {
             }
         }
         .padding(20).frame(width: 380)
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in pollDecision() }
-        .onAppear { if let p = store.currentProject { code = store.ensureRoomCode(for: p) } }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in now = Date().timeIntervalSince1970; pollDecision() }
+        .onAppear { if let p = store.currentProject { refreshRoom(p) } }
     }
 
     private func join() {
