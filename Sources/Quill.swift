@@ -65,7 +65,7 @@ enum Palette {
         Theme(name: "Sepia",    accent: (0.62, 0.45, 0.24), paperLight: (0.98, 0.96, 0.90)),
         Theme(name: "Forest",   accent: (0.20, 0.55, 0.38), paperLight: nil),
         Theme(name: "Crimson",  accent: (0.80, 0.27, 0.34), paperLight: nil),
-        Theme(name: "Ocean",    accent: (0.13, 0.52, 0.78), paperLight: nil),
+        Theme(name: "Ocean",    accent: (0.0, 0.40, 0.80), paperLight: nil),   // Apple Action Blue #0066cc
         Theme(name: "Plum",     accent: (0.56, 0.30, 0.72), paperLight: nil),
     ]
 
@@ -78,20 +78,20 @@ enum Palette {
     static func accentDark() -> Color { let a = current.accent; return Color(red: a.0 * 0.74, green: a.1 * 0.74, blue: a.2 * 0.80) }
     static func accentNS() -> NSColor { let a = current.accent; return NSColor(calibratedRed: a.0, green: a.1, blue: a.2, alpha: 1) }
 
-    // The writing page — a subtle tint of the theme accent.
+    // Cards / surfaces — Apple: pure white in light, faint tinted dark in dark mode.
     static func paper(_ scheme: ColorScheme) -> Color {
         let a = current.accent
         if scheme == .dark { return Color(red: 0.10 + 0.05 * a.0, green: 0.10 + 0.05 * a.1, blue: 0.11 + 0.05 * a.2) }
         if let p = current.paperLight { return Color(red: p.0, green: p.1, blue: p.2) }
-        return Color(red: 0.94 + 0.06 * a.0, green: 0.94 + 0.06 * a.1, blue: 0.94 + 0.06 * a.2)
+        return .white
     }
 
-    // The area around the page — a stronger tint, so the whole editor changes.
+    // The canvas behind everything — Apple parchment (#f5f5f7) in light mode.
     static func surround(_ scheme: ColorScheme) -> Color {
         let a = current.accent
         if scheme == .dark { return Color(red: 0.05 + 0.11 * a.0, green: 0.05 + 0.11 * a.1, blue: 0.06 + 0.11 * a.2) }
-        if let p = current.paperLight { return Color(red: p.0 * 0.90, green: p.1 * 0.87, blue: p.2 * 0.82) }
-        return Color(red: 0.82 + 0.18 * a.0, green: 0.82 + 0.18 * a.1, blue: 0.82 + 0.18 * a.2)
+        if let p = current.paperLight { return Color(red: p.0 * 0.95, green: p.1 * 0.94, blue: p.2 * 0.90) }
+        return Color(red: 0.961, green: 0.961, blue: 0.965)
     }
 }
 
@@ -2797,183 +2797,161 @@ struct HomeView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 22) {
-                // Hero
-                VStack(spacing: 12) {
-                    Text("&")
-                        .font(.system(size: 38, weight: .bold, design: .serif)).foregroundStyle(.white)
-                        .frame(width: 76, height: 76)
-                        .background(RoundedRectangle(cornerRadius: 20).fill(
-                            LinearGradient(colors: [Palette.accent(), Palette.accentDark()], startPoint: .topLeading, endPoint: .bottomTrailing)))
-                        .shadow(color: Palette.accent().opacity(0.4), radius: 16, y: 7)
-                    Text(greeting).font(.system(size: 26, weight: .bold, design: .serif))
-                    Text(quote.isEmpty ? "Where your story begins." : quote)
-                        .font(.system(size: 12)).italic().foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center).frame(maxWidth: 440).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 38) {
+                // Hero — big tight headline + pill CTAs (Apple editorial)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(greeting)
+                        .font(.system(size: 44, weight: .semibold)).tracking(-0.6)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(recent.isEmpty ? "Start your first manuscript." : "Pick up your story, or start something new.")
+                        .font(.system(size: 21)).foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        pill("New Manuscript", filled: true) { post(.openPenwickNewProject) }
+                        if let u = recent.first?.url { pill("Continue writing", filled: false) { store.selection = u } }
+                    }.padding(.top, 8)
                 }
-                .padding(.top, 40)
+                .padding(.top, 52)
 
-                // Live stats
+                // Stats — flat metric cards
                 HStack(spacing: 12) {
-                    statCard("textformat.abc", fmt(totalWords), "words written")
-                    statCard("books.vertical.fill", "\(store.projects.count)", store.projects.count == 1 ? "manuscript" : "manuscripts")
-                    statCard("doc.on.doc.fill", "\(chapterCount)", chapterCount == 1 ? "chapter" : "chapters")
-                    statCard("doc.richtext.fill", "~\(fmt(estPages))", estPages == 1 ? "page" : "pages")
+                    statCard("textformat", fmt(totalWords), "words")
+                    statCard("books.vertical", "\(store.projects.count)", store.projects.count == 1 ? "manuscript" : "manuscripts")
+                    statCard("doc.on.doc", "\(chapterCount)", chapterCount == 1 ? "chapter" : "chapters")
+                    statCard("doc.richtext", "~\(fmt(estPages))", estPages == 1 ? "page" : "pages")
                 }
-                .frame(maxWidth: 720)
 
-                // Quick-start cards
-                HStack(spacing: 14) {
-                    actionCard("book.closed.fill", "New Manuscript", "Start a fresh project") { NotificationCenter.default.post(name: .openPenwickNewProject, object: nil) }
-                    actionCard("arrow.right.circle.fill", "Continue Writing", recent.first.map { "Resume “\(snippet($0.title))”" } ?? "Open your latest chapter") {
-                        if let u = recent.first?.url { store.selection = u }
-                    }
-                    actionCard("person.crop.rectangle.stack.fill", "Name Generator", "Spin up character names") {
-                        NotificationCenter.default.post(name: .openPenwickGenerator, object: nil)
-                    }
-                }
-                .frame(maxWidth: 720)
-
-                // Library — your actual projects as covers
                 if !store.projects.isEmpty {
-                    section("YOUR LIBRARY") {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 14)], spacing: 14) {
-                            ForEach(store.projects) { p in projectCover(p) }
-                        }
+                    sectionTitle("Your library")
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 210), spacing: 16)], spacing: 16) {
+                        ForEach(store.projects) { p in projectCover(p) }
                     }
                 }
 
-                // Recent chapters
                 if !recent.isEmpty {
-                    section("PICK UP WHERE YOU LEFT OFF") {
-                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                            ForEach(recent.prefix(6)) { ch in
-                                Button { store.selection = ch.url } label: {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "doc.text").foregroundStyle(Palette.accent())
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(snippet(ch.title, words: 7)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                                            Text("\(projectName(of: ch)) · \(shortRelative(ch.modified)) · \(fmt(ch.wordCount)) words")
-                                                .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                                        }
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.horizontal, 13).padding(.vertical, 11)
-                                    .background(RoundedRectangle(cornerRadius: 11).fill(Palette.paper(scheme)))
-                                    .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.primary.opacity(0.06)))
-                                }
-                                .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
-                            }
-                        }
+                    sectionTitle("Pick up where you left off")
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                        ForEach(recent.prefix(6)) { ch in recentRow(ch) }
                     }
                 }
 
-                // Tools & features
-                section("TOOLS & FEATURES") {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12)], spacing: 12) {
-                        toolTile("person.crop.rectangle.stack", "Name Generator", "Characters, gender-matched") { post(.openPenwickGenerator) }
-                        toolTile("clock.arrow.circlepath", "Version History", "Restore earlier drafts") { post(.openPenwickHistory) }
-                        toolTile("arrow.down.doc", "Export", "PDF, DOCX, Fountain & more") { post(.openPenwickExport) }
-                        toolTile("person.2", "Collaborate", "Write together via iCloud") { post(.openPenwickCollaborate) }
-                        toolTile("number", "Page Numbers", "Per-project, styleable") { if let u = recent.first?.url { store.selection = u } }
-                        toolTile("gearshape", "Settings", "Theme, name, updates") { post(.openPenwickSettings) }
-                    }
+                sectionTitle("Tools")
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 12)], spacing: 12) {
+                    toolTile("person.crop.rectangle.stack", "Name generator", "Characters, gender-matched") { post(.openPenwickGenerator) }
+                    toolTile("clock.arrow.circlepath", "Version history", "Restore earlier drafts") { post(.openPenwickHistory) }
+                    toolTile("arrow.down.doc", "Export", "PDF, DOCX, Fountain & more") { post(.openPenwickExport) }
+                    toolTile("person.2", "Collaborate", "Write together via iCloud") { post(.openPenwickCollaborate) }
+                    toolTile("number", "Page numbers", "Per-project, styleable") { if let u = recent.first?.url { store.selection = u } }
+                    toolTile("gearshape", "Settings", "Theme, name, updates") { post(.openPenwickSettings) }
                 }
 
-                // Who's here
                 if !store.collaborators.isEmpty {
-                    section("WHO'S HERE") {
-                        HStack(spacing: 8) {
-                            ForEach(store.collaborators) { c in
-                                HStack(spacing: 6) {
-                                    Circle().fill(Palette.accent()).frame(width: 8, height: 8)
-                                    Text(c.name).font(.system(size: 12))
-                                }
-                                .padding(.horizontal, 10).padding(.vertical, 6)
-                                .background(Capsule().fill(Palette.paper(scheme)))
+                    sectionTitle("Who's here")
+                    HStack(spacing: 8) {
+                        ForEach(store.collaborators) { c in
+                            HStack(spacing: 6) {
+                                Circle().fill(Palette.accent()).frame(width: 7, height: 7)
+                                Text(c.name).font(.system(size: 13))
                             }
-                            Spacer()
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(Capsule().fill(Palette.paper(scheme)))
+                            .overlay(Capsule().strokeBorder(.primary.opacity(0.08)))
                         }
+                        Spacer()
                     }
                 }
 
-                Spacer(minLength: 40)
+                Spacer(minLength: 48)
             }
+            .frame(maxWidth: 880, alignment: .leading)
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 40)
         }
-        .background(
-            ZStack {
-                Palette.surround(scheme)
-                RadialGradient(colors: [Palette.accent().opacity(scheme == .dark ? 0.20 : 0.14), .clear],
-                               center: .top, startRadius: 10, endRadius: 520)
-            }.ignoresSafeArea()
-        )
+        .background(Palette.surround(scheme).ignoresSafeArea())
         .onAppear { if quote.isEmpty { quote = quotes.randomElement() ?? quotes[0] } }
     }
 
     private func post(_ n: Notification.Name) { NotificationCenter.default.post(name: n, object: nil) }
 
-    @ViewBuilder private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.system(size: 10, weight: .bold)).tracking(1.2).foregroundStyle(.secondary)
-            content()
+    private func sectionTitle(_ t: String) -> some View {
+        Text(t).font(.system(size: 24, weight: .semibold)).tracking(-0.4)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 4)
+    }
+
+    // Apple pill CTA — filled Action Blue, or a blue ghost outline.
+    private func pill(_ title: String, filled: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 16))
+                .foregroundStyle(filled ? Color.white : Palette.accent())
+                .padding(.horizontal, 22).padding(.vertical, 11)
+                .background(Capsule().fill(filled ? Palette.accent() : Color.clear))
+                .overlay(Capsule().strokeBorder(Palette.accent(), lineWidth: filled ? 0 : 1))
         }
-        .frame(maxWidth: 720, alignment: .leading)
+        .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 
     private func statCard(_ icon: String, _ value: String, _ label: String) -> some View {
-        VStack(spacing: 4) {
-            Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Palette.accent())
-            Text(value).font(.system(size: 22, weight: .bold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.6)
-            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            Image(systemName: icon).font(.system(size: 14)).foregroundStyle(Palette.accent())
+            Text(value).font(.system(size: 26, weight: .semibold)).tracking(-0.5).monospacedDigit().lineLimit(1).minimumScaleFactor(0.5)
+            Text(label).font(.system(size: 13)).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity).padding(.vertical, 16)
-        .background(RoundedRectangle(cornerRadius: 13).fill(Palette.paper(scheme)))
-        .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(.primary.opacity(0.06)))
+        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        .background(RoundedRectangle(cornerRadius: 18).fill(Palette.paper(scheme)))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.primary.opacity(0.08)))
     }
 
     private func projectCover(_ p: Project) -> some View {
         Button { store.selection = p.chapters.first?.url } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                ZStack(alignment: .bottomLeading) {
-                    RoundedRectangle(cornerRadius: 12).fill(
-                        LinearGradient(colors: [Palette.accent(), Palette.accentDark()], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(height: 96)
-                    Text("&").font(.system(size: 30, weight: .bold, design: .serif))
-                        .foregroundStyle(.white.opacity(0.92)).padding(12)
-                    Rectangle().fill(.white.opacity(0.25)).frame(width: 3)
-                        .padding(.vertical, 12).padding(.leading, 6)
+            VStack(alignment: .leading, spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12).fill(Palette.accent().opacity(0.10)).frame(height: 92)
+                    Text("&").font(.system(size: 34, weight: .semibold, design: .serif)).foregroundStyle(Palette.accent())
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(p.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text("\(p.chapters.count) ch · \(fmt(p.totalWords)) words")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                    if let d = p.lastEdited {
-                        Text("Edited \(shortRelative(d))").font(.system(size: 9)).foregroundStyle(.tertiary)
-                    }
+                    Text(p.name).font(.system(size: 15, weight: .semibold)).tracking(-0.2).lineLimit(1)
+                    Text("\(p.chapters.count) ch · \(fmt(p.totalWords)) words").font(.system(size: 12)).foregroundStyle(.secondary)
+                    if let d = p.lastEdited { Text("Edited \(shortRelative(d))").font(.system(size: 11)).foregroundStyle(.tertiary) }
                 }
-                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(RoundedRectangle(cornerRadius: 12).fill(Palette.paper(scheme)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.07)))
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 18).fill(Palette.paper(scheme)))
+            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.primary.opacity(0.08)))
+        }
+        .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
+    }
+
+    private func recentRow(_ ch: Chapter) -> some View {
+        Button { store.selection = ch.url } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "doc.text").font(.system(size: 15)).foregroundStyle(Palette.accent())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(snippet(ch.title, words: 7)).font(.system(size: 15, weight: .medium)).tracking(-0.2).lineLimit(1)
+                    Text("\(projectName(of: ch)) · \(shortRelative(ch.modified)) · \(fmt(ch.wordCount)) words")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Palette.paper(scheme)))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08)))
         }
         .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 
     private func toolTile(_ icon: String, _ title: String, _ subtitle: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon).font(.system(size: 16)).foregroundStyle(Palette.accent()).frame(width: 22)
+            HStack(spacing: 12) {
+                Image(systemName: icon).font(.system(size: 17)).foregroundStyle(Palette.accent()).frame(width: 24)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                    Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(title).font(.system(size: 14, weight: .medium)).tracking(-0.2).lineLimit(1)
+                    Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12).padding(.vertical, 11)
-            .background(RoundedRectangle(cornerRadius: 11).fill(Palette.paper(scheme)))
-            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.primary.opacity(0.06)))
+            .padding(.horizontal, 14).padding(.vertical, 13)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Palette.paper(scheme)))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08)))
         }
         .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
@@ -2983,21 +2961,5 @@ struct HomeView: View {
         let parts = s.split(whereSeparator: { $0.isWhitespace })
         let head = parts.prefix(words).joined(separator: " ")
         return parts.count > words ? head + "…" : head
-    }
-
-    private func actionCard(_ icon: String, _ title: String, _ subtitle: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
-                Image(systemName: icon).font(.system(size: 20)).foregroundStyle(Palette.accent())
-                Text(title).font(.system(size: 14, weight: .semibold))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
-                    .lineLimit(2).truncationMode(.tail)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .background(RoundedRectangle(cornerRadius: 14).fill(Palette.paper(scheme)))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.07)))
-        }
-        .buttonStyle(.plain).onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 }
