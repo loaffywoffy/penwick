@@ -1483,6 +1483,8 @@ func scriptFont(bold: Bool) -> NSFont {
 
 // MARK: - Editor controller
 
+enum ListKind { case none, bullet, numbered, checklist }
+
 @MainActor
 final class EditorController: ObservableObject {
     weak var textView: NSTextView?
@@ -1495,6 +1497,7 @@ final class EditorController: ObservableObject {
     @Published var selAlign: NSTextAlignment? = .natural   // nil = mixed
     @Published var scriptElementLabel = "Action"
     @Published var selColor: Color = .primary
+    @Published var selList: ListKind = .none
 
     // Reflect what's actually under the selection (or the caret) in the toolbar.
     func refreshSelection() {
@@ -1543,6 +1546,8 @@ final class EditorController: ObservableObject {
         if selUnderline != underline { selUnderline = underline }
         if selStrike != strike { selStrike = strike }
         if selAlign != align { selAlign = align }
+        let lk = currentListKind()
+        if selList != lk { selList = lk }
         let el = currentScriptElement().label
         if scriptElementLabel != el { scriptElementLabel = el }
         // current foreground colour (for the colour well)
@@ -1770,7 +1775,37 @@ final class EditorController: ObservableObject {
         refreshSelection()
     }
 
+    // Which list (if any) the caret's line is in — drives the toolbar's on/off state.
+    func currentListKind() -> ListKind {
+        guard let tv = textView, let st = tv.textStorage else { return .none }
+        let ns = st.string as NSString
+        guard ns.length > 0 else { return .none }
+        let lr = ns.lineRange(for: NSRange(location: min(tv.selectedRange().location, ns.length - 1), length: 0))
+        let line = ns.substring(with: lr)
+        if line.hasPrefix("•  ") { return .bullet }
+        if line.hasPrefix("☐  ") || line.hasPrefix("☑  ") { return .checklist }
+        if line.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil { return .numbered }
+        return .none
+    }
+    // Strip any list markers from the selected paragraphs (toggle off).
+    private func removeListMarkers() {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        let ns = storage.string as NSString
+        let para = ns.paragraphRange(for: tv.selectedRange())
+        let block = ns.substring(with: para)
+        let endsWithNewline = block.hasSuffix("\n")
+        var lines = block.components(separatedBy: "\n")
+        if endsWithNewline { lines.removeLast() }
+        let rebuilt = lines.map { strip($0) }
+        var joined = rebuilt.joined(separator: "\n"); if endsWithNewline { joined += "\n" }
+        let attrs: [NSAttributedString.Key: Any] = [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: defaultParagraphStyle()]
+        textEdit(para, replacement: NSAttributedString(string: joined, attributes: attrs))
+        tv.setSelectedRange(NSRange(location: para.location, length: 0))
+        refreshSelection()
+    }
+
     func list(numbered: Bool) {
+        if currentListKind() == (numbered ? .numbered : .bullet) { removeListMarkers(); return }
         guard let tv = textView, let storage = tv.textStorage else { return }
         let ns = storage.string as NSString
         let para = ns.paragraphRange(for: tv.selectedRange())
@@ -1796,6 +1831,7 @@ final class EditorController: ObservableObject {
     }
     // Checklist: prefix each selected line with an empty checkbox (click it to tick).
     func checklist() {
+        if currentListKind() == .checklist { removeListMarkers(); return }
         guard let tv = textView, let storage = tv.textStorage else { return }
         let ns = storage.string as NSString
         let para = ns.paragraphRange(for: tv.selectedRange())
@@ -2935,13 +2971,15 @@ struct FormatBar: View {
             }.menuStyle(.borderlessButton).fixedSize()
 
             bar
-            Menu {
-                Button("Larger") { fontSize = min(48, fontSize + 1); editor.setSize(fontSize) }
-                Button("Smaller") { fontSize = max(9, fontSize - 1); editor.setSize(fontSize) }
-                Divider()
-                ForEach([13, 15, 17, 20, 24, 28], id: \.self) { s in Button("\(s) pt") { fontSize = Double(s); editor.setSize(Double(s)) } }
-            } label: { HStack(spacing: 4) { Image(systemName: "textformat.size"); Text(editor.selSize.map { "\(Int($0))" } ?? "—").font(.system(size: 12)) } }
-                .menuStyle(.borderlessButton).fixedSize()
+            // Size: tap −/+ to nudge by one, or the number for presets.
+            grp {
+                fmt("minus") { stepSize(-1) }
+                Menu {
+                    ForEach([11, 13, 15, 17, 20, 24, 28, 36], id: \.self) { s in Button("\(s) pt") { fontSize = Double(s); editor.setSize(Double(s)) } }
+                } label: { Text(editor.selSize.map { "\(Int($0))" } ?? "—").font(.system(size: 12)).frame(minWidth: 18) }
+                    .menuStyle(.borderlessButton).fixedSize()
+                fmt("plus") { stepSize(1) }
+            }
 
             bar
             Menu {
@@ -2967,13 +3005,21 @@ struct FormatBar: View {
                   fmt("text.aligncenter", active: editor.selAlign == .center) { editor.setAlignment(.center) }
                   fmt("text.alignright", active: editor.selAlign == .right) { editor.setAlignment(.right) } }
             bar
-            grp { fmt("list.bullet") { editor.list(numbered: false) }; fmt("list.number") { editor.list(numbered: true) }; fmt("checklist") { editor.checklist() } }
+            grp { fmt("list.bullet", active: editor.selList == .bullet) { editor.list(numbered: false) }
+                  fmt("list.number", active: editor.selList == .numbered) { editor.list(numbered: true) }
+                  fmt("checklist", active: editor.selList == .checklist) { editor.checklist() } }
             bar
             grp {
                 fmt("photo") { penwickInsertImage(editor) }
                 fmt("bubble.left") { penwickAddComment(store, editor) }
             }
         }
+    }
+
+    private func stepSize(_ delta: Double) {
+        let cur = editor.selSize.map(Double.init) ?? fontSize
+        let n = min(48, max(9, (cur + delta).rounded()))
+        fontSize = n; editor.setSize(n)
     }
 
     private var bar: some View { Divider().frame(height: 16).padding(.horizontal, 3) }
