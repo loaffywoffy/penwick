@@ -615,12 +615,20 @@ enum Updater {
     // Update simply when our code != the code published on GitHub.
     static var current: String { (Bundle.main.infoDictionary?["PenwickBuildCode"] as? String) ?? "" }
 
+    // Append a unique query so GitHub's CDN can't serve a stale cached copy.
+    private static func bust(_ url: URL) -> URL {
+        var c = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        c?.queryItems = [URLQueryItem(name: "t", value: "\(Int(Date().timeIntervalSince1970))")]
+        return c?.url ?? url
+    }
+
     static func check() async -> (url: URL, notes: String)? {
-        guard let (data, _) = try? await URLSession.shared.data(from: versionURL),
+        var req = URLRequest(url: bust(versionURL)); req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let code = j["code"] as? String, let us = j["url"] as? String, let u = URL(string: us) else { return nil }
         guard code != current, !current.isEmpty else { return nil }
-        return (u, (j["notes"] as? String) ?? "")
+        return (bust(u), (j["notes"] as? String) ?? "")   // fresh zip too, not a cached old one
     }
 
     @MainActor static func performUpdate(from url: URL) async -> Bool {
@@ -1843,6 +1851,19 @@ final class EditorController: ObservableObject {
         }
     }
 
+    // Replace a range with new text, keeping the original formatting (font/colour) — used by AI edits.
+    func applyEdit(range: NSRange, text: String) {
+        guard let tv = textView, let st = tv.textStorage, NSMaxRange(range) <= st.length else { return }
+        let attrs: [NSAttributedString.Key: Any] = st.length > 0
+            ? st.attributes(at: min(range.location, st.length - 1), effectiveRange: nil)
+            : [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: defaultParagraphStyle()]
+        let repl = NSAttributedString(string: text, attributes: attrs)
+        if tv.shouldChangeText(in: range, replacementString: text) {
+            st.replaceCharacters(in: range, with: repl); tv.didChangeText()
+            tv.setSelectedRange(NSRange(location: range.location, length: (text as NSString).length))
+        }
+    }
+
     // Jump to / select a range (used by the comments panel).
     func goTo(range: NSRange) {
         guard let tv = textView, NSMaxRange(range) <= (tv.string as NSString).length else { return }
@@ -2858,12 +2879,10 @@ struct ContentView: View {
                 // Tools.
                 Menu {
                     Button("Insert Image…") { penwickInsertImage(editor) }.disabled(store.selectedChapter == nil)
-                    Button("Continue with AI") { penwickContinueWithAI(store, editor) }.disabled(store.selectedChapter == nil)
                     Button("Add Comment…") { penwickAddComment(store, editor) }.disabled(store.selectedChapter == nil)
                     Button("Comments…") { showComments = true }.disabled(store.selectedChapter == nil)
                     Button("Name Generator…") { showGenerator = true }
                     Button("Version History…") { showHistory = true }.disabled(store.selectedChapter == nil)
-                    Button("Show Files in Finder") { store.revealRoot() }
                     Divider()
                     Button("Check for Updates…") { checkForUpdates(silent: false) }
                 } label: { Label("Tools", systemImage: "wrench.and.screwdriver") }
@@ -3316,6 +3335,7 @@ struct EditorView: View {
     @Environment(\.colorScheme) var scheme
     @AppStorage("theme") private var activeTheme = "Ocean"
     @AppStorage("focusMode") private var focusMode = false
+    @State private var showAI = false
     let url: URL
 
     var chapter: Chapter? { store.chapter(url) }
@@ -3345,6 +3365,23 @@ struct EditorView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 ChapterNavBar()
+            }
+            // Floating AI assistant — chat + approve-to-edit.
+            .overlay(alignment: .bottomTrailing) {
+                VStack(alignment: .trailing, spacing: 12) {
+                    if showAI { AIChatPanel(editor: editor, onClose: { showAI = false }).transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity)) }
+                    Button { showAI.toggle() } label: {
+                        Image(systemName: showAI ? "xmark" : "sparkles")
+                            .font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
+                            .frame(width: 48, height: 48)
+                            .background(Circle().fill(LinearGradient(colors: [Palette.accent(), Palette.accentDark()], startPoint: .topLeading, endPoint: .bottomTrailing)))
+                            .shadow(color: Palette.accent().opacity(0.45), radius: 12, y: 5)
+                    }
+                    .buttonStyle(.plain).hoverScale(1.08)
+                    .help("AI assistant")
+                }
+                .padding(20)
+                .animation(.spring(response: 0.3, dampingFraction: 0.78), value: showAI)
             }
         }
     }
@@ -3885,6 +3922,126 @@ struct HoverScale: ViewModifier {
     }
 }
 extension View { func hoverScale(_ s: CGFloat = 1.025) -> some View { modifier(HoverScale(scale: s)) } }
+
+// Floating AI chat — chat, or (with text selected) propose an edit you approve before applying.
+struct AIChatPanel: View {
+    @ObservedObject var editor: EditorController
+    @Environment(\.colorScheme) var scheme
+    var onClose: () -> Void
+
+    struct Msg: Identifiable { let id = UUID(); let role: String; let text: String }   // "you" / "ai"
+    @State private var msgs: [Msg] = []
+    @State private var input = ""
+    @State private var thinking = false
+    @State private var proposalRange: NSRange?
+    @State private var proposalText = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Circle().fill(LinearGradient(colors: [Palette.accent(), Palette.accentDark()], startPoint: .top, endPoint: .bottom))
+                    .frame(width: 22, height: 22)
+                    .overlay(Image(systemName: "sparkles").font(.system(size: 11)).foregroundStyle(.white))
+                Text("AI assistant").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button { onClose() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 14)).foregroundStyle(.secondary) }.buttonStyle(.plain)
+            }
+            .padding(12)
+            Divider()
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        if msgs.isEmpty {
+                            Text("Ask me anything — or select text in your page and tell me how to change it. I'll show the edit for you to approve.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary).padding(.vertical, 6)
+                        }
+                        ForEach(msgs) { m in bubble(m) }
+                        if thinking { Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary).id("end") }
+                        if let r = proposalRange { proposalCard(r) }
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                    .padding(12)
+                }
+                .onChange(of: msgs.count) { _, _ in withAnimation { proxy.scrollTo("end") } }
+            }
+
+            Divider()
+            HStack(spacing: 8) {
+                TextField("Message…", text: $input, axis: .vertical).textFieldStyle(.plain).lineLimit(1...4)
+                    .onSubmit(send)
+                Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).foregroundStyle(Palette.accent()) }
+                    .buttonStyle(.plain).disabled(thinking || input.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(10)
+        }
+        .frame(width: 340, height: 460)
+        .background(RoundedRectangle(cornerRadius: 16).fill(.regularMaterial))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.10)))
+        .shadow(color: .black.opacity(0.28), radius: 24, y: 10)
+    }
+
+    private func bubble(_ m: Msg) -> some View {
+        HStack {
+            if m.role == "you" { Spacer(minLength: 30) }
+            Text(m.text).font(.system(size: 13)).textSelection(.enabled)
+                .padding(.horizontal, 11).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 12).fill(m.role == "you" ? Palette.accent().opacity(0.16) : Color.primary.opacity(0.06)))
+                .frame(maxWidth: 250, alignment: m.role == "you" ? .trailing : .leading)
+            if m.role == "ai" { Spacer(minLength: 30) }
+        }
+        .frame(maxWidth: .infinity, alignment: m.role == "you" ? .trailing : .leading)
+    }
+
+    private func proposalCard(_ range: NSRange) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("PROPOSED EDIT").font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(.secondary)
+            Text(proposalText).font(.system(size: 13)).foregroundStyle(.primary)
+            HStack {
+                Button("Approve") { editor.applyEdit(range: range, text: proposalText); msgs.append(Msg(role: "ai", text: "Applied — your font is kept.")); proposalRange = nil }
+                    .buttonStyle(.borderedProminent).controlSize(.small).tint(Palette.accent())
+                Button("Discard") { proposalRange = nil; msgs.append(Msg(role: "ai", text: "Discarded.")) }
+                    .buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+        .padding(11)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Palette.accent().opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.accent().opacity(0.4)))
+    }
+
+    private func send() {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !thinking else { return }
+        guard AIClient.isConfigured else { msgs.append(Msg(role: "ai", text: "Link an AI first in Settings → AI.")); input = ""; return }
+        input = ""
+        let tv = editor.textView
+        let sel = tv?.selectedRange() ?? NSRange(location: 0, length: 0)
+        let selText = (sel.length > 0 && tv != nil) ? (tv!.string as NSString).substring(with: sel) : ""
+        msgs.append(Msg(role: "you", text: text))
+        thinking = true
+        let history = msgs.map { "\($0.role == "you" ? "User" : "Assistant"): \($0.text)" }.joined(separator: "\n")
+        Task {
+            do {
+                if !selText.isEmpty {
+                    let reply = try await AIClient.complete(
+                        system: "You are an editor. Apply the instruction to the passage and return ONLY the revised passage — no preamble, no quotes, no markdown.",
+                        prompt: "Instruction: \(text)\n\nPassage:\n\(selText)")
+                    await MainActor.run {
+                        proposalText = reply.trimmingCharacters(in: .whitespacesAndNewlines); proposalRange = sel
+                        msgs.append(Msg(role: "ai", text: "Here's a revision — approve to apply it to your selection.")); thinking = false
+                    }
+                } else {
+                    let reply = try await AIClient.complete(
+                        system: "You are a helpful, concise writing assistant inside a writing app.",
+                        prompt: history + "\nAssistant:")
+                    await MainActor.run { msgs.append(Msg(role: "ai", text: reply.trimmingCharacters(in: .whitespacesAndNewlines))); thinking = false }
+                }
+            } catch {
+                await MainActor.run { msgs.append(Msg(role: "ai", text: "Error: \(error.localizedDescription)")); thinking = false }
+            }
+        }
+    }
+}
 
 // Collaborate via a memorable 3-word room code.
 struct CollaborateView: View {
