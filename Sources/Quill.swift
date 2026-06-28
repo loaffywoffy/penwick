@@ -528,7 +528,11 @@ struct SettingsView: View {
         aiTesting = true; aiTestResult = ""
         Task {
             func finish(_ models: [String]) {
-                if modelBinding.wrappedValue.isEmpty { modelBinding.wrappedValue = models[0] }
+                // Use the current model only if it's actually installed (match exact or name before ':'),
+                // otherwise switch to one that IS — fixes "connected but model not installed".
+                let cur = modelBinding.wrappedValue
+                let installed = !cur.isEmpty && models.contains { $0 == cur || $0.hasPrefix(cur + ":") || cur.hasPrefix($0 + ":") }
+                if !installed { modelBinding.wrappedValue = models[0] }
                 aiTestResult = "Connected — using \(AIClient.model)"; aiTesting = false
             }
             if let m = await AIClient.ollamaModels() {
@@ -782,6 +786,13 @@ struct Chapter: Identifiable, Equatable {
     var wordCount: Int { plain.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count }
 }
 
+struct CommentReply: Codable, Equatable, Identifiable {
+    var id = UUID().uuidString
+    var author: String
+    var text: String
+    var date: Date
+}
+
 struct Comment: Identifiable, Codable, Equatable {
     var id: String
     var text: String
@@ -790,6 +801,7 @@ struct Comment: Identifiable, Codable, Equatable {
     var location: Int
     var length: Int
     var date: Date
+    var replies: [CommentReply]? = nil   // optional so old comments.json still decodes
 }
 
 struct Collaborator: Identifiable, Equatable {
@@ -1282,6 +1294,14 @@ final class PenwickStore: ObservableObject {
     func deleteComment(_ id: String, for url: URL) {
         commentsByChapter[url]?.removeAll { $0.id == id }
         saveComments(for: url)
+    }
+    func addReply(_ text: String, to id: String, for url: URL) {
+        guard var arr = commentsByChapter[url], let i = arr.firstIndex(where: { $0.id == id }) else { return }
+        var c = arr[i]
+        var r = c.replies ?? []
+        r.append(CommentReply(author: authorName.isEmpty ? "You" : authorName, text: text, date: Date()))
+        c.replies = r; arr[i] = c
+        commentsByChapter[url] = arr; saveComments(for: url)
     }
 
     // MARK: Per-chapter emoji tags — stored in <project>/.penwick/emoji.json (filename → emoji).
@@ -2188,12 +2208,16 @@ final class PageTextView: NSTextView {
         return super.becomeFirstResponder()
     }
 
-    // ── Comment hover bubble — appears after ~0.25s and follows the cursor ──────
-    var commentRanges: [(range: NSRange, text: String)] = []
+    // ── Comment hover — instant bubble; hold ⌘ to open a full, repliable card ──────
+    var commentRanges: [(range: NSRange, comment: Comment)] = []
+    weak var commentStore: PenwickStore?
+    var commentURL: URL?
     private var hoverTracking: NSTrackingArea?
-    private var hoverTimer: Timer?
     private var bubbleWindow: NSWindow?
-    private var bubbleText: String?
+    private var bubbleKey: String?
+    private var hoverComment: Comment?
+    private var hoverRect: NSRect = .zero
+    private var detailPopover: NSPopover?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -2204,34 +2228,41 @@ final class PageTextView: NSTextView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         let pt = convert(event.locationInWindow, from: nil)
-        guard let text = commentText(at: pt) else { hoverTimer?.invalidate(); hoverTimer = nil; hideBubble(); return }
+        guard let hit = commentAt(pt) else { hoverComment = nil; hideBubble(); return }
+        hoverComment = hit.comment; hoverRect = hit.rect
+        if event.modifierFlags.contains(.command) { showDetail() ; return }   // already holding ⌘
+        let key = hit.comment.id
         if bubbleWindow != nil {
-            if text != bubbleText { hideBubble(); showBubble(text, at: event) } else { positionBubble(at: event) }
+            if key != bubbleKey { hideBubble(); showBubble(hit.comment, at: event) } else { positionBubble(at: event) }
         } else {
-            hoverTimer?.invalidate()
-            hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
-                self?.showBubble(text, at: event)
-            }
+            showBubble(hit.comment, at: event)   // instant, no delay
         }
     }
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event); hoverTimer?.invalidate(); hoverTimer = nil; hideBubble()
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        if event.modifierFlags.contains(.command), hoverComment != nil { showDetail() }
     }
-    private func commentText(at pt: NSPoint) -> String? {
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event); hoverComment = nil; hideBubble()
+    }
+    private func commentAt(_ pt: NSPoint) -> (comment: Comment, rect: NSRect)? {
         guard !commentRanges.isEmpty, let lm = layoutManager, let tc = textContainer, let st = textStorage, st.length > 0 else { return nil }
         let p = NSPoint(x: pt.x - textContainerOrigin.x, y: pt.y - textContainerOrigin.y)
         var frac: CGFloat = 0
         let gi = lm.glyphIndex(for: p, in: tc, fractionOfDistanceThroughGlyph: &frac)
         guard lm.boundingRect(forGlyphRange: NSRange(location: gi, length: 1), in: tc).contains(p) else { return nil }
         let ci = lm.characterIndexForGlyph(at: gi)
-        return commentRanges.first { NSLocationInRange(ci, $0.range) }?.text
+        guard let hit = commentRanges.first(where: { NSLocationInRange(ci, $0.range) }) else { return nil }
+        let r = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: hit.range, actualCharacterRange: nil), in: tc)
+            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        return (hit.comment, r)
     }
-    private func showBubble(_ text: String, at event: NSEvent) {
+    private func showBubble(_ c: Comment, at event: NSEvent) {
         guard let host = window else { return }
-        let label = NSTextField(wrappingLabelWithString: text)
+        let label = NSTextField(wrappingLabelWithString: "\(c.author): \(c.text)\n⌘ to reply")
         label.font = .systemFont(ofSize: 12); label.textColor = .white; label.drawsBackground = false; label.isBezeled = false; label.isEditable = false
-        label.preferredMaxLayoutWidth = 260
-        let size = label.sizeThatFits(NSSize(width: 260, height: 400))
+        label.preferredMaxLayoutWidth = 250
+        let size = label.sizeThatFits(NSSize(width: 250, height: 400))
         let pad: CGFloat = 9
         let cv = NSView(frame: NSRect(x: 0, y: 0, width: size.width + pad * 2, height: size.height + pad * 2))
         cv.wantsLayer = true; cv.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.97).cgColor; cv.layer?.cornerRadius = 8
@@ -2241,7 +2272,7 @@ final class PageTextView: NSTextView {
         win.isOpaque = false; win.backgroundColor = .clear; win.level = .floating; win.ignoresMouseEvents = true; win.hasShadow = true
         win.contentView = cv
         host.addChildWindow(win, ordered: .above)
-        bubbleWindow = win; bubbleText = text
+        bubbleWindow = win; bubbleKey = c.id
         positionBubble(at: event)
     }
     private func positionBubble(at event: NSEvent) {
@@ -2251,7 +2282,16 @@ final class PageTextView: NSTextView {
     }
     private func hideBubble() {
         if let w = bubbleWindow { w.parent?.removeChildWindow(w); w.orderOut(nil) }
-        bubbleWindow = nil; bubbleText = nil
+        bubbleWindow = nil; bubbleKey = nil
+    }
+    // Hold ⌘ over a comment → open the full interactive card (read, reply, delete).
+    private func showDetail() {
+        guard detailPopover == nil, let c = hoverComment, let store = commentStore, let url = commentURL else { return }
+        hideBubble()
+        let pop = NSPopover(); pop.behavior = .transient
+        pop.contentViewController = NSHostingController(rootView: CommentDetailView(store: store, url: url, commentId: c.id, onClose: { [weak self] in self?.detailPopover?.performClose(nil); self?.detailPopover = nil }))
+        pop.show(relativeTo: hoverRect, of: self, preferredEdge: .maxY)
+        detailPopover = pop
     }
 
     // Click a checklist box (☐ / ☑) to tick it off.
@@ -2662,13 +2702,13 @@ struct RichTextEditor: NSViewRepresentable {
             guard let lm = layoutManager, let st = textStorage else { return }
             let full = NSRange(location: 0, length: st.length)
             lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full)
-            var ranges: [(NSRange, String)] = []
+            var ranges: [(NSRange, Comment)] = []
             for c in parent.store.comments(for: parent.url) {
                 guard let r = parent.store.resolvedRange(c, in: st.string), r.length > 0, NSMaxRange(r) <= st.length else { continue }
                 lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.32), forCharacterRange: r)
-                ranges.append((r, "\(c.author): \(c.text)"))
+                ranges.append((r, c))
             }
-            for tv in pageViews { tv.commentRanges = ranges }   // drives the hover bubble
+            for tv in pageViews { tv.commentRanges = ranges; tv.commentStore = parent.store; tv.commentURL = parent.url }
         }
 
         func reposition() {
@@ -3918,6 +3958,51 @@ struct JoinRequestPrompt: ViewModifier {
             if ok { store.approveJoin(p, id: id) } else { store.denyJoin(p, id: id) }
         }
         joinReq = nil
+    }
+}
+
+// The ⌘-hover detail card: read a comment in full, reply, or delete it.
+struct CommentDetailView: View {
+    @ObservedObject var store: PenwickStore
+    let url: URL
+    let commentId: String
+    var onClose: () -> Void
+    @State private var reply = ""
+    private var comment: Comment? { store.comments(for: url).first { $0.id == commentId } }
+    private func stamp(_ d: Date) -> String { let f = DateFormatter(); f.dateFormat = "MMM d, h:mm a"; return f.string(from: d) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let c = comment {
+                Text("“\(c.quote)”").font(.system(size: 12)).italic().foregroundStyle(.secondary).lineLimit(3)
+                Divider()
+                msg(c.author, c.text, c.date)
+                ForEach(c.replies ?? []) { r in msg(r.author, r.text, r.date) }
+                Divider()
+                HStack(spacing: 8) {
+                    TextField("Reply…", text: $reply).textFieldStyle(.roundedBorder).font(.system(size: 12))
+                        .onSubmit(send)
+                    Button("Reply") { send() }.controlSize(.small).disabled(reply.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Spacer()
+                    Button { store.deleteComment(c.id, for: url); onClose() } label: { Image(systemName: "trash") }
+                        .controlSize(.small).foregroundStyle(.red).help("Delete comment")
+                }
+            } else {
+                Text("This comment was removed.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(14).frame(width: 300)
+    }
+    private func msg(_ author: String, _ text: String, _ date: Date) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(text).font(.system(size: 13))
+            Text("\(author) · \(stamp(date))").font(.system(size: 9)).foregroundStyle(.tertiary)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    private func send() {
+        let t = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        store.addReply(t, to: commentId, for: url); reply = ""
     }
 }
 
