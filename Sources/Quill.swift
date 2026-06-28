@@ -288,6 +288,28 @@ final class ExportActions: NSObject {
     }
 }
 
+@MainActor func penwickAddComment(_ store: PenwickStore, _ editor: EditorController) {
+    guard let tv = editor.textView, let url = store.selection else { return }
+    let r = tv.selectedRange()
+    guard r.length > 0 else {
+        let a = NSAlert(); a.messageText = "Select some text first"
+        a.informativeText = "Highlight the words you want to comment on, then choose Add Comment."
+        a.runModal(); return
+    }
+    let quote = (tv.string as NSString).substring(with: r)
+    let alert = NSAlert(); alert.messageText = "Add a comment"
+    let shown = quote.count > 70 ? String(quote.prefix(70)) + "…" : quote
+    alert.informativeText = "On: “\(shown)”"
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+    field.placeholderString = "Your note…"
+    alert.accessoryView = field
+    alert.addButton(withTitle: "Add"); alert.addButton(withTitle: "Cancel")
+    if alert.runModal() == .alertFirstButtonReturn {
+        let t = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { store.addComment(t, range: r, quote: quote, for: url) }
+    }
+}
+
 @MainActor func penwickInsertImage(_ editor: EditorController) {
     let panel = NSOpenPanel()
     panel.title = "Insert Image"
@@ -517,6 +539,16 @@ struct Chapter: Identifiable, Equatable {
     var wordCount: Int { plain.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count }
 }
 
+struct Comment: Identifiable, Codable, Equatable {
+    var id: String
+    var text: String
+    var quote: String
+    var author: String
+    var location: Int
+    var length: Int
+    var date: Date
+}
+
 struct Collaborator: Identifiable, Equatable {
     let id: String
     let name: String
@@ -560,6 +592,7 @@ final class PenwickStore: ObservableObject {
     @Published var selection: URL? { didSet { if selection != oldValue { loadPageNumberPrefs() } } }
     @Published var pageNumberPrefs = PageNumberPrefs()   // for the current project
     @Published var chapterEmojis: [URL: String] = [:]    // per-chapter emoji tags
+    @Published var commentsByChapter: [URL: [Comment]] = [:]
 
     let root: URL
     let iCloudAvailable: Bool
@@ -905,6 +938,46 @@ final class PenwickStore: ObservableObject {
             .filter { UserDefaults.standard.bool(forKey: "script:" + $0.path) })
         loadPageNumberPrefs()   // pick up the current project's saved page-number style
         loadChapterEmojis()
+        loadComments()
+    }
+
+    // MARK: Comments / margin notes — stored per project in .penwick/comments.json (filename → [Comment]).
+    private func commentsFile(_ dir: URL) -> URL { dir.appendingPathComponent(".penwick/comments.json") }
+    private func loadComments() {
+        var map: [URL: [Comment]] = [:]
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .secondsSince1970
+        for p in projects {
+            guard let d = try? Data(contentsOf: commentsFile(p.url)),
+                  let j = try? dec.decode([String: [Comment]].self, from: d) else { continue }
+            for ch in p.chapters { if let cs = j[ch.url.lastPathComponent], !cs.isEmpty { map[ch.url] = cs } }
+        }
+        commentsByChapter = map
+    }
+    func comments(for url: URL) -> [Comment] { (commentsByChapter[url] ?? []).sorted { $0.location < $1.location } }
+    private func saveComments(for url: URL) {
+        let dir = url.deletingLastPathComponent()
+        let file = commentsFile(dir)
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .secondsSince1970
+        var j: [String: [Comment]] = [:]
+        if let d = try? Data(contentsOf: file), let existing = try? { () -> [String: [Comment]] in
+            let dec = JSONDecoder(); dec.dateDecodingStrategy = .secondsSince1970
+            return try dec.decode([String: [Comment]].self, from: d)
+        }() { j = existing }
+        j[url.lastPathComponent] = commentsByChapter[url] ?? []
+        if (j[url.lastPathComponent]?.isEmpty ?? true) { j.removeValue(forKey: url.lastPathComponent) }
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent(".penwick", isDirectory: true), withIntermediateDirectories: true)
+        if let data = try? enc.encode(j) { try? data.write(to: file) }
+    }
+    func addComment(_ text: String, range: NSRange, quote: String, for url: URL) {
+        let c = Comment(id: UUID().uuidString, text: text, quote: quote,
+                        author: authorName.isEmpty ? "You" : authorName,
+                        location: range.location, length: range.length, date: Date())
+        commentsByChapter[url, default: []].append(c)
+        saveComments(for: url)
+    }
+    func deleteComment(_ id: String, for url: URL) {
+        commentsByChapter[url]?.removeAll { $0.id == id }
+        saveComments(for: url)
     }
 
     // MARK: Per-chapter emoji tags — stored in <project>/.penwick/emoji.json (filename → emoji).
@@ -1525,6 +1598,14 @@ final class EditorController: ObservableObject {
         }
     }
 
+    // Jump to / select a range (used by the comments panel).
+    func goTo(range: NSRange) {
+        guard let tv = textView, NSMaxRange(range) <= (tv.string as NSString).length else { return }
+        tv.window?.makeFirstResponder(tv)
+        tv.setSelectedRange(range)
+        tv.scrollRangeToVisible(range)
+    }
+
     // Insert an image at the caret, scaled to fit the page width. Persists via RTFD.
     func insertImage(_ image: NSImage) {
         guard let tv = textView, let st = tv.textStorage else { return }
@@ -1846,6 +1927,7 @@ struct RichTextEditor: NSViewRepresentable {
                                                name: NSView.frameDidChangeNotification, object: scroll.contentView)
 
         c.ensurePages()
+        c.applyCommentHighlights()
         DispatchQueue.main.async { c.controller.refreshSelection() }
         return scroll
     }
@@ -1866,6 +1948,7 @@ struct RichTextEditor: NSViewRepresentable {
         } else if numChanged {
             c.reposition()
         }
+        c.applyCommentHighlights()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -2038,6 +2121,19 @@ struct RichTextEditor: NSViewRepresentable {
                 tv.window?.makeFirstResponder(tv)
                 controller.textView = tv
                 tv.setSelectedRange(NSRange(location: safeIdx, length: 0))
+            }
+        }
+
+        // Highlight commented ranges using layout-manager temporary attributes (NOT saved to the text).
+        @MainActor func applyCommentHighlights() {
+            guard let lm = layoutManager, let st = textStorage else { return }
+            let full = NSRange(location: 0, length: st.length)
+            lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full)
+            for c in parent.store.comments(for: parent.url) {
+                let r = NSRange(location: c.location, length: c.length)
+                if r.length > 0, NSMaxRange(r) <= st.length {
+                    lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.32), forCharacterRange: r)
+                }
             }
         }
 
@@ -2249,6 +2345,7 @@ struct ContentView: View {
     @State private var showHistory = false
     @State private var showSettings = false
     @State private var showCollab = false
+    @State private var showComments = false
     @State private var joinReq: [String: Any]?
     @State private var showNewProject = false
     @State private var newProjectName = ""
@@ -2317,6 +2414,8 @@ struct ContentView: View {
                 // Tools.
                 Menu {
                     Button("Insert Image…") { penwickInsertImage(editor) }.disabled(store.selectedChapter == nil)
+                    Button("Add Comment…") { penwickAddComment(store, editor) }.disabled(store.selectedChapter == nil)
+                    Button("Comments…") { showComments = true }.disabled(store.selectedChapter == nil)
                     Button("Name Generator…") { showGenerator = true }
                     Button("Version History…") { showHistory = true }.disabled(store.selectedChapter == nil)
                     Button("Show Files in Finder") { store.revealRoot() }
@@ -2371,6 +2470,11 @@ struct ContentView: View {
         .sheet(isPresented: $showCollab) {
             CollaborateView(store: store, onClose: { showCollab = false })
                 .frame(minWidth: 420, idealWidth: 420, minHeight: 440, idealHeight: 460)
+        }
+        .sheet(isPresented: $showComments) {
+            if let ch = store.selectedChapter {
+                CommentsView(store: store, editor: editor, url: ch.url, onClose: { showComments = false })
+            } else { Text("Open a chapter first.").padding(40) }
         }
         .alert("New Manuscript", isPresented: $showNewProject) {
             TextField("Project name", text: $newProjectName)
@@ -3250,6 +3354,58 @@ struct JoinRequestPrompt: ViewModifier {
             if ok { store.approveJoin(p, id: id) } else { store.denyJoin(p, id: id) }
         }
         joinReq = nil
+    }
+}
+
+// Comments / margin notes for the current chapter.
+struct CommentsView: View {
+    @ObservedObject var store: PenwickStore
+    let editor: EditorController
+    let url: URL
+    var onClose: () -> Void
+    @Environment(\.colorScheme) var scheme
+    private func stamp(_ d: Date) -> String { let f = DateFormatter(); f.dateFormat = "MMM d, h:mm a"; return f.string(from: d) }
+    var body: some View {
+        let comments = store.comments(for: url)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Comments").font(.system(size: 16, weight: .semibold))
+                Spacer()
+                Button { onClose() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(.secondary) }.buttonStyle(.plain)
+            }.padding(16)
+            Divider()
+            if comments.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "bubble.left").font(.system(size: 26)).foregroundStyle(.secondary)
+                    Text("No comments yet").font(.system(size: 13, weight: .medium))
+                    Text("Select text in the page, then Tools → Add Comment.").font(.system(size: 11)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity).padding(.vertical, 40)
+            } else {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(comments) { c in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("“\(c.quote)”").font(.system(size: 12)).italic().foregroundStyle(.secondary).lineLimit(2)
+                                Text(c.text).font(.system(size: 13))
+                                HStack {
+                                    Text("\(c.author) · \(stamp(c.date))").font(.system(size: 10)).foregroundStyle(.tertiary)
+                                    Spacer()
+                                    Button("Go to") { editor.goTo(range: NSRange(location: c.location, length: c.length)); onClose() }
+                                        .font(.system(size: 11)).buttonStyle(.borderless)
+                                    Button { store.deleteComment(c.id, for: url) } label: { Image(systemName: "trash").font(.system(size: 11)) }
+                                        .buttonStyle(.borderless).foregroundStyle(.red)
+                                }
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(Palette.paper(scheme)))
+                            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.primary.opacity(0.08)))
+                        }
+                    }.padding(16)
+                }
+            }
+        }
+        .frame(width: 380, height: 460)
     }
 }
 
