@@ -318,6 +318,7 @@ extension Notification.Name {
     static let openPenwickExport = Notification.Name("openPenwickExport")
     static let openPenwickCollaborate = Notification.Name("openPenwickCollaborate")
     static let openPenwickNewProject = Notification.Name("openPenwickNewProject")
+    static let penwickJoinRequest = Notification.Name("penwickJoinRequest")
 }
 
 // MARK: - Settings (in-app panel, opened via ⌘, or the gear button)
@@ -546,6 +547,7 @@ final class PenwickStore: ObservableObject {
     @Published var projects: [Project] = []
     @Published var selection: URL? { didSet { if selection != oldValue { loadPageNumberPrefs() } } }
     @Published var pageNumberPrefs = PageNumberPrefs()   // for the current project
+    @Published var chapterEmojis: [URL: String] = [:]    // per-chapter emoji tags
 
     let root: URL
     let iCloudAvailable: Bool
@@ -690,7 +692,7 @@ final class PenwickStore: ObservableObject {
     // Poll iCloud Drive for changes from collaborators and refresh the binder.
     private func startWatching() {
         watchTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkForExternalChanges() }
+            Task { @MainActor in self?.checkForExternalChanges(); self?.scanJoinRequests() }
         }
     }
     private func checkForExternalChanges() {
@@ -737,11 +739,18 @@ final class PenwickStore: ObservableObject {
     // MARK: Collaboration room codes — a memorable 3-word join code (e.g. TAN-ARM-HER).
     // Stored in <project>/.penwick/room.json so it travels with the shared folder.
     // Common, easy-to-spell 3-letter words only.
-    static let roomWords = ["cat","dog","sun","sky","sea","run","top","tap","tan","arm","leg",
-        "ear","eye","cup","pen","ink","map","key","box","bag","bed","cap","car","bus","van","jet",
-        "fox","owl","ant","bee","cow","hen","pig","bat","rat","hat","mat","net","pot","pan","jar",
-        "mug","fan","log","ice","fog","ray","day","oak","elm","tea","pie","jam","egg","ham","nut",
-        "bun","pea","cod","kid","pup","joy","paw","fur","sit","hop","jog","row","oar","cub"]
+    static let roomWords = ["the","and","for","are","but","not","you","all","can","her","was","one",
+        "our","out","day","get","has","him","his","how","man","new","now","old","see","two","way","who",
+        "boy","did","its","let","put","say","she","too","use","dad","age","ago","air","arm","art","ask",
+        "bad","bag","ban","bar","bat","bed","big","bit","box","buy","car","cat","cop","cow","cry","cup",
+        "cut","dog","dry","due","ear","eat","egg","end","eye","far","fat","few","fly","fun","gas","got",
+        "gun","gut","guy","had","ham","hat","hit","hot","hug","ice","job","joy","key","kid","kit","law",
+        "lay","leg","lie","lip","lot","low","mad","map","mix","mom","mud","mug","nap","net","odd","oil",
+        "own","pad","pan","pay","pen","pet","pie","pig","pin","pit","pop","pot","pro","pub","raw","red",
+        "rid","rip","rod","row","rub","run","sad","sat","set","shy","sin","sir","sit","six","ski","sky",
+        "sob","son","spy","sum","sun","tab","tan","tar","tax","tea","ten","tie","tip","toe","top","toy",
+        "try","tub","tug","van","vow","war","web","wed","wet","win","wit","woe","won","yes","yet","zoo",
+        "ace","act","add","aid","aim","arc","ash","aye","bay","bee","bow"]
 
     private func roomFile(_ p: Project) -> URL { p.url.appendingPathComponent(".penwick/room.json") }
     private func canonCode(_ s: String) -> String { String(s.uppercased().filter { $0 >= "A" && $0 <= "Z" }) }
@@ -765,11 +774,11 @@ final class PenwickStore: ObservableObject {
         return code
     }
 
-    // Find a project whose room code matches and open it. Scans linked projects plus
-    // the iCloud Drive (where an accepted share lands) so a code "auto-matches".
-    @discardableResult func joinRoom(code entered: String) -> Bool {
+    // Find the project folder whose room code matches. Scans linked projects plus the
+    // iCloud Drive (where an accepted share lands) so a code can "auto-match".
+    func findRoomFolder(code entered: String) -> URL? {
         let target = canonCode(entered)
-        guard target.count == 9 else { return false }
+        guard target.count == 9 else { return nil }
         let fm = FileManager.default
         var candidates = projectFolders()
         let iCloudRoot = root.deletingLastPathComponent()   // …/CloudDocs
@@ -782,11 +791,66 @@ final class PenwickStore: ObservableObject {
             guard let d = try? Data(contentsOf: url.appendingPathComponent(".penwick/room.json")),
                   let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                   let c = j["code"] as? String, canonCode(c) == target else { continue }
-            if url.path.hasPrefix(root.path) { reload(); selection = projects.first { $0.url == url }?.chapters.first?.url }
-            else { _ = openExternalProject(url) }
-            return true
+            return url
         }
-        return false
+        return nil
+    }
+
+    func openMatchedProject(_ url: URL) {
+        if url.path.hasPrefix(root.path) { reload(); selection = projects.first { $0.url == url }?.chapters.first?.url }
+        else { _ = openExternalProject(url) }
+    }
+
+    // MARK: Join approval — the joiner asks, the host must approve before they're let in.
+    private var promptedRequests: Set<String> = []
+
+    func requestJoin(at url: URL) {
+        let dir = url.appendingPathComponent(".penwick/requests", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dict: [String: Any] = ["id": userID, "name": authorName, "t": Date().timeIntervalSince1970]
+        if let data = try? JSONSerialization.data(withJSONObject: dict) {
+            try? data.write(to: dir.appendingPathComponent("\(userID).json"))
+        }
+    }
+    // "approved" / "denied" / nil — what the host decided about MY request.
+    func joinDecision(at url: URL) -> String? {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.appendingPathComponent(".penwick/approved/\(userID).json").path) { return "approved" }
+        if fm.fileExists(atPath: url.appendingPathComponent(".penwick/denied/\(userID).json").path) { return "denied" }
+        return nil
+    }
+    private func decisionExists(_ proj: URL, _ id: String) -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: proj.appendingPathComponent(".penwick/approved/\(id).json").path)
+            || fm.fileExists(atPath: proj.appendingPathComponent(".penwick/denied/\(id).json").path)
+    }
+    private func writeDecision(_ proj: URL, _ kind: String, _ id: String) {
+        let dir = proj.appendingPathComponent(".penwick/\(kind)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data("{}".utf8).write(to: dir.appendingPathComponent("\(id).json"))
+    }
+    func approveJoin(_ proj: URL, id: String) { writeDecision(proj, "approved", id) }
+    func denyJoin(_ proj: URL, id: String) { writeDecision(proj, "denied", id) }
+
+    // Host side: look for join requests across all projects and surface the first
+    // undecided one for an Approve/Deny prompt.
+    func scanJoinRequests() {
+        for p in projects {
+            let reqDir = p.url.appendingPathComponent(".penwick/requests")
+            guard let files = try? FileManager.default.contentsOfDirectory(at: reqDir, includingPropertiesForKeys: nil) else { continue }
+            for f in files where f.pathExtension == "json" {
+                guard let d = try? Data(contentsOf: f),
+                      let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                      let id = j["id"] as? String, id != userID else { continue }
+                if decisionExists(p.url, id) { continue }
+                let key = "\(p.url.path)|\(id)"
+                if promptedRequests.contains(key) { continue }
+                promptedRequests.insert(key)
+                let name = (j["name"] as? String) ?? "Someone"
+                NotificationCenter.default.post(name: .penwickJoinRequest,
+                                                object: ["project": p.url, "id": id, "name": name, "projectName": p.name])
+            }
+        }
     }
 
     // All project folders: local subfolders of root + linked external ones.
@@ -826,6 +890,30 @@ final class PenwickStore: ObservableObject {
         scriptChapters = Set(projects.flatMap { $0.chapters }.map { $0.url }
             .filter { UserDefaults.standard.bool(forKey: "script:" + $0.path) })
         loadPageNumberPrefs()   // pick up the current project's saved page-number style
+        loadChapterEmojis()
+    }
+
+    // MARK: Per-chapter emoji tags — stored in <project>/.penwick/emoji.json (filename → emoji).
+    private func emojiFile(forProjectAt dir: URL) -> URL { dir.appendingPathComponent(".penwick/emoji.json") }
+    private func loadChapterEmojis() {
+        var map: [URL: String] = [:]
+        for p in projects {
+            guard let d = try? Data(contentsOf: emojiFile(forProjectAt: p.url)),
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: String] else { continue }
+            for ch in p.chapters { if let e = j[ch.url.lastPathComponent] { map[ch.url] = e } }
+        }
+        chapterEmojis = map
+    }
+    func emoji(for url: URL) -> String? { chapterEmojis[url] }
+    func setEmoji(_ emoji: String?, for url: URL) {
+        let dir = url.deletingLastPathComponent()
+        let file = emojiFile(forProjectAt: dir)
+        var j: [String: String] = [:]
+        if let d = try? Data(contentsOf: file), let existing = try? JSONSerialization.jsonObject(with: d) as? [String: String] { j = existing }
+        let key = url.lastPathComponent
+        if let e = emoji, !e.isEmpty { j[key] = e; chapterEmojis[url] = e } else { j.removeValue(forKey: key); chapterEmojis.removeValue(forKey: url) }
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent(".penwick", isDirectory: true), withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: j) { try? data.write(to: file) }
     }
 
     // Lookups
@@ -2035,6 +2123,7 @@ struct ContentView: View {
     @State private var showHistory = false
     @State private var showSettings = false
     @State private var showCollab = false
+    @State private var joinReq: [String: Any]?
     @State private var showNewProject = false
     @State private var newProjectName = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -2170,6 +2259,7 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickHistory)) { _ in if store.selectedChapter != nil { showHistory = true } }
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickExport)) { _ in penwickExport(store, editor) }
         .onReceive(NotificationCenter.default.publisher(for: .openPenwickCollaborate)) { _ in showCollab = true }
+        .modifier(JoinRequestPrompt(store: store, joinReq: $joinReq))
         .animation(.easeInOut(duration: 0.18), value: showGenerator)
         .animation(.easeInOut(duration: 0.18), value: showHistory)
         .animation(.easeInOut(duration: 0.18), value: showSettings)
@@ -2207,6 +2297,7 @@ struct Binder: View {
     @State private var renameTarget: Project?
     @State private var renameText = ""
     @State private var chapterToDelete: URL?
+    @State private var emojiTarget: URL?
     @State private var projectToDelete: Project?
 
     private func match(_ c: Chapter) -> Bool {
@@ -2274,6 +2365,7 @@ struct Binder: View {
                                         .fill(ch.url == store.selection ? Palette.accent().opacity(0.20) : Color.clear)
                                         .padding(.horizontal, 6).padding(.vertical, 1))
                                 .contextMenu {
+                                    Button("Set Emoji…") { emojiTarget = ch.url }
                                     Button("Move Up") { store.moveChapter(ch.url, in: project, up: true) }
                                     Button("Move Down") { store.moveChapter(ch.url, in: project, up: false) }
                                     Divider()
@@ -2320,6 +2412,9 @@ struct Binder: View {
         } message: {
             Text("\"\(chapterToDelete.flatMap { store.chapter($0)?.title } ?? "This chapter")\" will be removed from iCloud Drive. This can't be undone.")
         }
+        .sheet(isPresented: Binding(get: { emojiTarget != nil }, set: { if !$0 { emojiTarget = nil } })) {
+            if let u = emojiTarget { EmojiPickerView(store: store, chapterURL: u, onClose: { emojiTarget = nil }) }
+        }
         .confirmationDialog("Delete this project?",
                             isPresented: Binding(get: { projectToDelete != nil }, set: { if !$0 { projectToDelete = nil } }),
                             titleVisibility: .visible) {
@@ -2332,15 +2427,50 @@ struct Binder: View {
 }
 
 struct ChapterRow: View {
+    @EnvironmentObject var store: PenwickStore
     let chapter: Chapter
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(chapter.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
-            Text(chapter.snippet).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-            Text("Edited \(shortRelative(chapter.modified))")
-                .font(.system(size: 10)).foregroundStyle(.tertiary)
+        HStack(alignment: .top, spacing: 8) {
+            if let e = store.emoji(for: chapter.url) {
+                Text(e).font(.system(size: 16)).frame(width: 20)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(chapter.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                Text(chapter.snippet).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                Text("Edited \(shortRelative(chapter.modified))")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 3).padding(.leading, 4)
+    }
+}
+
+// A compact emoji picker for tagging a document.
+struct EmojiPickerView: View {
+    @ObservedObject var store: PenwickStore
+    let chapterURL: URL
+    var onClose: () -> Void
+    private let choices = ["📖","📚","✍️","📝","📌","⭐️","🔥","💡","🎬","🎭","🗺️","⚔️","🌙","☀️","🌊","🏔️","🌲","🌹","🩸","👑","💀","🕯️","🔮","🎻","🚪","🗝️","📜","🪶","✨","❄️","🍂","🐉","🦊","🐺","⚓️","🧭","💔","💍","🏰","🌟"]
+    private let cols = Array(repeating: GridItem(.flexible(), spacing: 6), count: 8)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Tag this document").font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button { onClose() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(.secondary) }.buttonStyle(.plain)
+            }
+            LazyVGrid(columns: cols, spacing: 6) {
+                ForEach(choices, id: \.self) { e in
+                    Button { store.setEmoji(e, for: chapterURL); onClose() } label: {
+                        Text(e).font(.system(size: 22)).frame(width: 34, height: 34)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.05)))
+                    }.buttonStyle(.plain)
+                }
+            }
+            Button("Remove emoji") { store.setEmoji(nil, for: chapterURL); onClose() }
+                .font(.system(size: 12)).buttonStyle(.borderless)
+        }
+        .padding(18).frame(width: 360)
     }
 }
 
@@ -2906,6 +3036,36 @@ struct CharacterCard: View {
 
 // The home pane — lives inside the normal split view (sidebar stays visible),
 // uses the editor's own surface/accent, and scrolls. Shown when no chapter is open.
+// Host-side "X wants to join" Approve/Deny prompt (extracted so ContentView.body stays light).
+struct JoinRequestPrompt: ViewModifier {
+    @ObservedObject var store: PenwickStore
+    @Binding var joinReq: [String: Any]?
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .penwickJoinRequest)) { note in
+                if joinReq == nil, let d = note.object as? [String: Any] { joinReq = d }
+            }
+            .confirmationDialog("Someone wants to join",
+                                isPresented: Binding(get: { joinReq != nil }, set: { if !$0 { joinReq = nil } }),
+                                titleVisibility: .visible) {
+                Button("Approve") { decide(true) }
+                Button("Deny", role: .destructive) { decide(false) }
+                Button("Cancel", role: .cancel) { joinReq = nil }
+            } message: { Text(message) }
+    }
+    private var message: String {
+        let n = (joinReq?["name"] as? String) ?? "Someone"
+        let p = (joinReq?["projectName"] as? String) ?? "your project"
+        return "\(n) wants to join “\(p)”."
+    }
+    private func decide(_ ok: Bool) {
+        if let r = joinReq, let p = r["project"] as? URL, let id = r["id"] as? String {
+            if ok { store.approveJoin(p, id: id) } else { store.denyJoin(p, id: id) }
+        }
+        joinReq = nil
+    }
+}
+
 // Collaborate via a memorable 3-word room code.
 struct CollaborateView: View {
     @ObservedObject var store: PenwickStore
@@ -2914,6 +3074,8 @@ struct CollaborateView: View {
     @State private var code = ""
     @State private var joinText = ""
     @State private var joinMsg = ""
+    @State private var waiting = false
+    @State private var pendingURL: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2952,20 +3114,37 @@ struct CollaborateView: View {
                 HStack(spacing: 10) {
                     TextField("TAN-ARM-HER", text: $joinText)
                         .textFieldStyle(.roundedBorder).font(.system(size: 15, design: .monospaced)).onSubmit(join)
-                    capsule("Join", filled: true, action: join)
+                        .disabled(waiting)
+                    if waiting { ProgressView().scaleEffect(0.6).frame(width: 60) }
+                    else { capsule("Join", filled: true, action: join) }
                 }
                 if !joinMsg.isEmpty {
-                    Text(joinMsg).font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                    Text(joinMsg).font(.system(size: 11))
+                        .foregroundStyle(waiting ? Color.secondary : Color.red).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         .padding(20).frame(width: 380)
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in pollDecision() }
         .onAppear { if let p = store.currentProject { code = store.ensureRoomCode(for: p) } }
     }
 
     private func join() {
-        if store.joinRoom(code: joinText) { onClose() }
-        else { joinMsg = "No project found for that code yet. Make sure you've accepted their iCloud invite, then try again." }
+        guard let url = store.findRoomFolder(code: joinText) else {
+            joinMsg = "No project found for that code yet. Make sure you've accepted their iCloud invite, then try again."
+            return
+        }
+        store.requestJoin(at: url)
+        pendingURL = url; waiting = true
+        joinMsg = "Asked to join — waiting for the host to approve…"
+    }
+    private func pollDecision() {
+        guard waiting, let url = pendingURL else { return }
+        switch store.joinDecision(at: url) {
+        case "approved": store.openMatchedProject(url); onClose()
+        case "denied": waiting = false; pendingURL = nil; joinMsg = "The host declined the request."
+        default: break
+        }
     }
     private func capsule(_ t: String, filled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
