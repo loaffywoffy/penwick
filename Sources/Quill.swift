@@ -901,10 +901,20 @@ final class PenwickStore: ObservableObject {
             guard let d = try? Data(contentsOf: emojiFile(forProjectAt: p.url)),
                   let j = try? JSONSerialization.jsonObject(with: d) as? [String: String] else { continue }
             for ch in p.chapters { if let e = j[ch.url.lastPathComponent] { map[ch.url] = e } }
+            if let pe = j["__project__"] { map[p.url] = pe }   // emoji for the manuscript itself
         }
         chapterEmojis = map
     }
     func emoji(for url: URL) -> String? { chapterEmojis[url] }
+    // Emoji for the whole manuscript (project folder), stored under "__project__".
+    func setProjectEmoji(_ emoji: String?, projectURL dir: URL) {
+        let file = emojiFile(forProjectAt: dir)
+        var j: [String: String] = [:]
+        if let d = try? Data(contentsOf: file), let e = try? JSONSerialization.jsonObject(with: d) as? [String: String] { j = e }
+        if let e = emoji, !e.isEmpty { j["__project__"] = e; chapterEmojis[dir] = e } else { j.removeValue(forKey: "__project__"); chapterEmojis.removeValue(forKey: dir) }
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent(".penwick", isDirectory: true), withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: j) { try? data.write(to: file) }
+    }
     func setEmoji(_ emoji: String?, for url: URL) {
         let dir = url.deletingLastPathComponent()
         let file = emojiFile(forProjectAt: dir)
@@ -2298,6 +2308,7 @@ struct Binder: View {
     @State private var renameText = ""
     @State private var chapterToDelete: URL?
     @State private var emojiTarget: URL?
+    @State private var emojiIsProject = false
     @State private var projectToDelete: Project?
 
     private func match(_ c: Chapter) -> Bool {
@@ -2327,8 +2338,12 @@ struct Binder: View {
                                 }
                             } label: {
                                 HStack(spacing: 6) {
-                                    Image(systemName: store.isExternal(project) ? "person.2.fill" : "book.closed.fill")
-                                        .foregroundStyle(Palette.accent()).font(.system(size: 11))
+                                    if let e = store.emoji(for: project.url) {
+                                        Text(e).font(.system(size: 13)).frame(width: 16)
+                                    } else {
+                                        Image(systemName: store.isExternal(project) ? "person.2.fill" : "book.closed.fill")
+                                            .foregroundStyle(Palette.accent()).font(.system(size: 11))
+                                    }
                                     Text(project.name).font(.system(size: 12, weight: .semibold))
                                     Spacer()
                                     if let d = project.lastEdited {
@@ -2341,8 +2356,9 @@ struct Binder: View {
                             .onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
                         }
                         .contextMenu {
+                            Button("Set Emoji…") { emojiIsProject = true; emojiTarget = project.url }
                             Button("New Chapter") { store.newChapter(in: project) }
-                            Button("Collaborate…") { store.selection = project.chapters.first?.url; penwickCollaborate(store) }
+                            Button("Collaborate…") { store.selection = project.chapters.first?.url; NotificationCenter.default.post(name: .openPenwickCollaborate, object: nil) }
                             Button("Rename…") { renameTarget = project; renameText = project.name }
                             Button("Reveal in Finder") { store.revealInFinder(project.url) }
                             Divider()
@@ -2365,7 +2381,7 @@ struct Binder: View {
                                         .fill(ch.url == store.selection ? Palette.accent().opacity(0.20) : Color.clear)
                                         .padding(.horizontal, 6).padding(.vertical, 1))
                                 .contextMenu {
-                                    Button("Set Emoji…") { emojiTarget = ch.url }
+                                    Button("Set Emoji…") { emojiIsProject = false; emojiTarget = ch.url }
                                     Button("Move Up") { store.moveChapter(ch.url, in: project, up: true) }
                                     Button("Move Down") { store.moveChapter(ch.url, in: project, up: false) }
                                     Divider()
@@ -2413,7 +2429,12 @@ struct Binder: View {
             Text("\"\(chapterToDelete.flatMap { store.chapter($0)?.title } ?? "This chapter")\" will be removed from iCloud Drive. This can't be undone.")
         }
         .sheet(isPresented: Binding(get: { emojiTarget != nil }, set: { if !$0 { emojiTarget = nil } })) {
-            if let u = emojiTarget { EmojiPickerView(store: store, chapterURL: u, onClose: { emojiTarget = nil }) }
+            if let u = emojiTarget {
+                EmojiPickerView(
+                    title: emojiIsProject ? "Tag this manuscript" : "Tag this document",
+                    apply: { e in if emojiIsProject { store.setProjectEmoji(e, projectURL: u) } else { store.setEmoji(e, for: u) } },
+                    onClose: { emojiTarget = nil })
+            }
         }
         .confirmationDialog("Delete this project?",
                             isPresented: Binding(get: { projectToDelete != nil }, set: { if !$0 { projectToDelete = nil } }),
@@ -2445,29 +2466,29 @@ struct ChapterRow: View {
     }
 }
 
-// A compact emoji picker for tagging a document.
+// A compact emoji picker for tagging a chapter or a whole manuscript.
 struct EmojiPickerView: View {
-    @ObservedObject var store: PenwickStore
-    let chapterURL: URL
+    let title: String
+    var apply: (String?) -> Void
     var onClose: () -> Void
     private let choices = ["📖","📚","✍️","📝","📌","⭐️","🔥","💡","🎬","🎭","🗺️","⚔️","🌙","☀️","🌊","🏔️","🌲","🌹","🩸","👑","💀","🕯️","🔮","🎻","🚪","🗝️","📜","🪶","✨","❄️","🍂","🐉","🦊","🐺","⚓️","🧭","💔","💍","🏰","🌟"]
     private let cols = Array(repeating: GridItem(.flexible(), spacing: 6), count: 8)
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Tag this document").font(.system(size: 15, weight: .semibold))
+                Text(title).font(.system(size: 15, weight: .semibold))
                 Spacer()
                 Button { onClose() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(.secondary) }.buttonStyle(.plain)
             }
             LazyVGrid(columns: cols, spacing: 6) {
                 ForEach(choices, id: \.self) { e in
-                    Button { store.setEmoji(e, for: chapterURL); onClose() } label: {
+                    Button { apply(e); onClose() } label: {
                         Text(e).font(.system(size: 22)).frame(width: 34, height: 34)
                             .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.05)))
                     }.buttonStyle(.plain)
                 }
             }
-            Button("Remove emoji") { store.setEmoji(nil, for: chapterURL); onClose() }
+            Button("Remove emoji") { apply(nil); onClose() }
                 .font(.system(size: 12)).buttonStyle(.borderless)
         }
         .padding(18).frame(width: 360)
