@@ -321,6 +321,29 @@ final class ExportActions: NSObject {
     }
 }
 
+@MainActor func penwickContinueWithAI(_ store: PenwickStore, _ editor: EditorController) {
+    guard AIClient.isConfigured else {
+        let a = NSAlert(); a.messageText = "No AI linked"
+        a.informativeText = "Open Settings → AI to link your API key or a local Ollama model."
+        a.runModal(); return
+    }
+    guard let tv = editor.textView else { return }
+    let tail = String(tv.string.suffix(2000))
+    Task {
+        do {
+            let out = try await AIClient.complete(
+                system: "You are a writing assistant. Continue the user's manuscript naturally, in the same voice and tense. Return only the continuation prose — no preamble or quotes.",
+                prompt: tail.isEmpty ? "Write a compelling opening paragraph." : tail)
+            await MainActor.run {
+                editor.appendAtEnd(NSAttributedString(string: out.trimmingCharacters(in: .whitespacesAndNewlines),
+                    attributes: [.font: bodyNSFont(), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: defaultParagraphStyle()]))
+            }
+        } catch {
+            await MainActor.run { let a = NSAlert(); a.messageText = "AI error"; a.informativeText = error.localizedDescription; a.runModal() }
+        }
+    }
+}
+
 @MainActor func penwickSetName(_ store: PenwickStore) {
     let alert = NSAlert()
     alert.messageText = "Your Name"
@@ -355,13 +378,123 @@ extension Notification.Name {
     static let penwickJoinRequest = Notification.Name("penwickJoinRequest")
 }
 
+// MARK: - AI (optional: link your own API key, or a local Ollama)
+
+enum AIProvider: String, CaseIterable, Identifiable {
+    case off = "Off"
+    case ollama = "Ollama (local, free)"
+    case anthropic = "Anthropic (Claude)"
+    case openai = "OpenAI (ChatGPT)"
+    var id: String { rawValue }
+    var defaultModel: String {
+        switch self {
+        case .off: return ""
+        case .ollama: return "llama3.2"
+        case .anthropic: return "claude-3-5-sonnet-latest"
+        case .openai: return "gpt-4o-mini"
+        }
+    }
+    var needsKey: Bool { self == .anthropic || self == .openai }
+}
+
+enum AIClient {
+    static var provider: AIProvider { AIProvider(rawValue: UserDefaults.standard.string(forKey: "aiProvider") ?? "Off") ?? .off }
+    static var key: String { UserDefaults.standard.string(forKey: "aiKey") ?? "" }
+    static var model: String {
+        let m = UserDefaults.standard.string(forKey: "aiModel") ?? ""
+        return m.isEmpty ? provider.defaultModel : m
+    }
+    static var ollamaURL: String {
+        let u = UserDefaults.standard.string(forKey: "aiOllamaURL") ?? ""
+        return u.isEmpty ? "http://localhost:11434" : u
+    }
+    static var isConfigured: Bool { provider != .off && (!provider.needsKey || !key.isEmpty) }
+
+    enum AIError: LocalizedError { case notConfigured, badResponse(String)
+        var errorDescription: String? {
+            switch self { case .notConfigured: return "No AI is linked. Open Settings → AI."
+            case .badResponse(let s): return s } }
+    }
+
+    static func complete(system: String, prompt: String, maxTokens: Int = 700) async throws -> String {
+        let p = provider
+        guard p != .off else { throw AIError.notConfigured }
+        var req: URLRequest
+        switch p {
+        case .anthropic:
+            guard !key.isEmpty else { throw AIError.notConfigured }
+            req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            req.httpMethod = "POST"
+            req.setValue(key, forHTTPHeaderField: "x-api-key")
+            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model, "max_tokens": maxTokens, "system": system,
+                "messages": [["role": "user", "content": prompt]]])
+        case .openai:
+            guard !key.isEmpty else { throw AIError.notConfigured }
+            req = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+            req.httpMethod = "POST"
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model, "max_tokens": maxTokens,
+                "messages": [["role": "system", "content": system], ["role": "user", "content": prompt]]])
+        case .ollama:
+            req = URLRequest(url: URL(string: "\(ollamaURL)/api/chat")!)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model, "stream": false,
+                "messages": [["role": "system", "content": system], ["role": "user", "content": prompt]]])
+        case .off: throw AIError.notConfigured
+        }
+        req.timeoutInterval = 60
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw AIError.badResponse("Error \(http.statusCode): \(body.prefix(200))")
+        }
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AIError.badResponse("Unexpected response.") }
+        switch p {
+        case .anthropic:
+            if let content = j["content"] as? [[String: Any]], let t = content.first?["text"] as? String { return t }
+        case .openai:
+            if let ch = j["choices"] as? [[String: Any]], let m = ch.first?["message"] as? [String: Any], let t = m["content"] as? String { return t }
+        case .ollama:
+            if let m = j["message"] as? [String: Any], let t = m["content"] as? String { return t }
+        case .off: break
+        }
+        throw AIError.badResponse("Couldn't read the reply.")
+    }
+}
+
 // MARK: - Settings (in-app panel, opened via ⌘, or the gear button)
 
 struct SettingsView: View {
     @EnvironmentObject var store: PenwickStore
     @AppStorage("appearance") private var appearance = "auto"
     @AppStorage("theme") private var theme = "Ocean"
+    @AppStorage("aiProvider") private var aiProvider = "Off"
+    @AppStorage("aiKey") private var aiKey = ""
+    @AppStorage("aiModel") private var aiModel = ""
+    @AppStorage("aiOllamaURL") private var aiOllamaURL = ""
+    @State private var aiTesting = false
+    @State private var aiTestResult = ""
     var onClose: () -> Void = {}
+
+    private func testAI() {
+        aiTesting = true; aiTestResult = ""
+        Task {
+            do {
+                let r = try await AIClient.complete(system: "Reply with the single word OK.", prompt: "Say OK", maxTokens: 10)
+                let ok = !r.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                await MainActor.run { aiTestResult = ok ? "Connected" : "Empty reply"; aiTesting = false }
+            } catch {
+                await MainActor.run { aiTestResult = error.localizedDescription; aiTesting = false }
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -389,6 +522,29 @@ struct SettingsView: View {
                     }
                     Picker("Color theme", selection: $theme) {
                         ForEach(Palette.themes) { Text($0.name).tag($0.name) }
+                    }
+                }
+                Section("AI assistant") {
+                    Picker("Provider", selection: $aiProvider) {
+                        ForEach(AIProvider.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    }
+                    if aiProvider != "Off" {
+                        if AIProvider(rawValue: aiProvider)?.needsKey == true {
+                            SecureField("API key", text: $aiKey)
+                        }
+                        TextField("Model", text: $aiModel,
+                                  prompt: Text(AIProvider(rawValue: aiProvider)?.defaultModel ?? ""))
+                        if aiProvider == AIProvider.ollama.rawValue {
+                            TextField("Ollama URL", text: $aiOllamaURL, prompt: Text("http://localhost:11434"))
+                        }
+                        HStack {
+                            Button(aiTesting ? "Testing…" : "Test connection") { testAI() }.disabled(aiTesting)
+                            if !aiTestResult.isEmpty {
+                                Text(aiTestResult).font(.caption).foregroundStyle(aiTestResult == "Connected" ? .green : .red)
+                            }
+                        }
+                        Text("Use your own API key, or run a free local model with Ollama. A Claude.ai or ChatGPT Plus subscription can't be used here — those don't include API access; the API is billed separately.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Section("Updates") {
@@ -2664,6 +2820,7 @@ struct ContentView: View {
                 // Tools.
                 Menu {
                     Button("Insert Image…") { penwickInsertImage(editor) }.disabled(store.selectedChapter == nil)
+                    Button("Continue with AI") { penwickContinueWithAI(store, editor) }.disabled(store.selectedChapter == nil)
                     Button("Add Comment…") { penwickAddComment(store, editor) }.disabled(store.selectedChapter == nil)
                     Button("Comments…") { showComments = true }.disabled(store.selectedChapter == nil)
                     Button("Name Generator…") { showGenerator = true }
@@ -3390,26 +3547,16 @@ enum CharacterGen {
         return f.string(from: d)
     }
 
-    // Comedy mode — silly given name + silly surname = reliably daft, near-infinite combos.
-    static let funnyFirsts = ["Bartholomew","Reginald","Mortimer","Cornelius","Englebert","Wilbur","Horace","Eugene","Percival","Archibald","Ferdinand","Thaddeus","Egbert","Norbert","Cuthbert","Humphrey","Mungo","Beauregard","Chadwick","Bartleby","Montgomery","Algernon","Bertram","Clarence","Ignatius","Leopold","Ulysses","Rupert","Granville","Phineas","Octavius","Barnaby","Wendell","Festus","Lemuel","Throckmorton"]
-    static let funnyLasts = ["Wigglesworth","Bottomley","Pumpernickel","Snodgrass","Higginbottom","Buttersworth","Dinglehopper","Fiddlesticks","Wobblebottom","Crumplehorn","Picklesworth","Nettlethorpe","Quackenbush","Bumblethorp","Wafflebottom","Snickerdoodle","Gigglesworth","Muttonchops","Cricklewood","Thistlewaite","Pennywhistle","Bogglesworth","Crumpetcake","Wimplethorpe","Fudgington","Bibblebop","Noodleman","Pinchbottom","Tiddlywink","Blunderbuss","Cobblepot","Dollophead","Flapdoodle","Gobblewonk","Pumblechook","Wickersnoot"]
-    static func funnyName() -> String { "\(funnyFirsts.randomElement()!) \(funnyLasts.randomElement()!)" }
-
-    static func make(gender g: String, type t: String, nationality nat: String, funny: Bool = false) -> Character {
+    static func make(gender g: String, type t: String, nationality nat: String) -> Character {
         let isMale = g == "Male" ? true : (g == "Female" ? false : Bool.random())
         let genderStr = isMale ? "Male" : "Female"
         let locale = nat == "Any" ? locales.randomElement()! : (locales.first { $0.nationality == nat } ?? locales.randomElement()!)
         let place = locale.places.randomElement()!
 
-        let name: String
-        if funny {
-            name = funnyName()
-        } else {
-            let pool = isMale ? NameDB.maleFirstNames : NameDB.femaleFirstNames
-            let first = pool.randomElement() ?? NameDB.firstNames.randomElement() ?? fallbackFirst.randomElement()!
-            let last = NameDB.surnames(locale.surname).randomElement() ?? fallbackLast.randomElement()!
-            name = "\(first) \(titleCased(last))"
-        }
+        let pool = isMale ? NameDB.maleFirstNames : NameDB.femaleFirstNames
+        let first = pool.randomElement() ?? NameDB.firstNames.randomElement() ?? fallbackFirst.randomElement()!
+        let last = NameDB.surnames(locale.surname).randomElement() ?? fallbackLast.randomElement()!
+        let name = "\(first) \(titleCased(last))"
 
         let typeName = t == "Any"
             ? weighted([("Child", 6), ("Adolescent", 16), ("Young Adult", 26), ("Adult", 30), ("Middle-Aged", 14), ("Senior", 8)])
@@ -3479,9 +3626,6 @@ struct CharacterGeneratorView: View {
                 labeled("Nationality") { Picker("", selection: $nationality) { ForEach(nationalities, id: \.self) { Text($0) } }.labelsHidden().frame(width: 120) }
                 labeled("Count") { Stepper("\(count)", value: $count, in: 1...12).fixedSize() }
                 Spacer()
-                Button { generateFunny() } label: { Label("Funny", systemImage: "face.smiling") }
-                    .buttonStyle(.bordered).controlSize(.large)
-                    .help("Generate silly comedy names")
                 Button { generate() } label: { Label("Generate", systemImage: "wand.and.stars") }
                     .buttonStyle(.borderedProminent).controlSize(.large).tint(Palette.accent())
             }
@@ -3507,9 +3651,6 @@ struct CharacterGeneratorView: View {
 
     private func generate() {
         results = (0..<count).map { _ in CharacterGen.make(gender: gender, type: type, nationality: nationality) }
-    }
-    private func generateFunny() {
-        results = (0..<count).map { _ in CharacterGen.make(gender: gender, type: type, nationality: nationality, funny: true) }
     }
 
     @ViewBuilder private func labeled<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
