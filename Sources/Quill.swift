@@ -388,13 +388,20 @@ enum AIProvider: String, CaseIterable, Identifiable {
         }
     }
     var needsKey: Bool { self == .anthropic || self == .openai }
+    var keyId: String {   // stable per-provider id for separate key/model storage
+        switch self { case .off: return "off"; case .ollama: return "ollama"; case .anthropic: return "anthropic"; case .openai: return "openai" }
+    }
+    var shortName: String {
+        switch self { case .off: return "Off"; case .ollama: return "Ollama"; case .anthropic: return "Claude"; case .openai: return "ChatGPT" }
+    }
 }
 
 enum AIClient {
     static var provider: AIProvider { AIProvider(rawValue: UserDefaults.standard.string(forKey: "aiProvider") ?? "Off") ?? .off }
-    static var key: String { UserDefaults.standard.string(forKey: "aiKey") ?? "" }
+    // Keys & models are stored PER provider, so switching between Claude/ChatGPT keeps each its own.
+    static var key: String { UserDefaults.standard.string(forKey: "aiKey_\(provider.keyId)") ?? "" }
     static var model: String {
-        let m = UserDefaults.standard.string(forKey: "aiModel") ?? ""
+        let m = UserDefaults.standard.string(forKey: "aiModel_\(provider.keyId)") ?? ""
         return m.isEmpty ? provider.defaultModel : m
     }
     static var ollamaURL: String {
@@ -488,12 +495,21 @@ struct SettingsView: View {
     @EnvironmentObject var store: PenwickStore
     @AppStorage("appearance") private var appearance = "auto"
     @AppStorage("aiProvider") private var aiProvider = "Off"
-    @AppStorage("aiKey") private var aiKey = ""
-    @AppStorage("aiModel") private var aiModel = ""
     @AppStorage("aiOllamaURL") private var aiOllamaURL = ""
     @State private var aiTesting = false
     @State private var aiTestResult = ""
     var onClose: () -> Void = {}
+
+    private var providerObj: AIProvider { AIProvider(rawValue: aiProvider) ?? .off }
+    // Per-provider key & model — switching providers shows that provider's own values.
+    private var keyBinding: Binding<String> {
+        let k = "aiKey_\(providerObj.keyId)"
+        return Binding(get: { UserDefaults.standard.string(forKey: k) ?? "" }, set: { UserDefaults.standard.set($0, forKey: k) })
+    }
+    private var modelBinding: Binding<String> {
+        let k = "aiModel_\(providerObj.keyId)"
+        return Binding(get: { UserDefaults.standard.string(forKey: k) ?? "" }, set: { UserDefaults.standard.set($0, forKey: k) })
+    }
 
     private func testAI() {
         aiTesting = true; aiTestResult = ""
@@ -512,8 +528,8 @@ struct SettingsView: View {
         aiTesting = true; aiTestResult = ""
         Task {
             func finish(_ models: [String]) {
-                if aiModel.isEmpty { aiModel = models[0] }
-                aiTestResult = "Connected — using \(aiModel)"; aiTesting = false
+                if modelBinding.wrappedValue.isEmpty { modelBinding.wrappedValue = models[0] }
+                aiTestResult = "Connected — using \(AIClient.model)"; aiTesting = false
             }
             if let m = await AIClient.ollamaModels() {
                 if m.isEmpty { await MainActor.run { aiTestResult = "Ollama is running but has no models. In Terminal run:  ollama pull llama3.2"; aiTesting = false } }
@@ -567,11 +583,10 @@ struct SettingsView: View {
                         if new == AIProvider.ollama.rawValue { setupOllama() }   // auto set up on select
                     }
                     if aiProvider != "Off" {
-                        if AIProvider(rawValue: aiProvider)?.needsKey == true {
-                            SecureField("API key", text: $aiKey)
+                        if providerObj.needsKey {
+                            SecureField("\(providerObj.shortName) API key", text: keyBinding).id("key-\(aiProvider)")
                         }
-                        TextField("Model", text: $aiModel,
-                                  prompt: Text(AIProvider(rawValue: aiProvider)?.defaultModel ?? ""))
+                        TextField("Model", text: modelBinding, prompt: Text(providerObj.defaultModel)).id("model-\(aiProvider)")
                         if aiProvider == AIProvider.ollama.rawValue {
                             TextField("Ollama URL", text: $aiOllamaURL, prompt: Text("http://localhost:11434"))
                         }
@@ -1718,8 +1733,11 @@ func scriptFont(bold: Bool) -> NSFont {
 
 enum ListKind { case none, bullet, numbered, checklist }
 
+struct AIMessage: Identifiable, Equatable { let id = UUID(); let role: String; let text: String }   // role: "you" / "ai"
+
 @MainActor
 final class EditorController: ObservableObject {
+    @Published var aiMessages: [AIMessage] = []   // kept here so the chat survives closing the panel
     weak var textView: NSTextView?
     @Published var selFamily: String? = "New York"   // nil = mixed across selection
     @Published var selSize: CGFloat? = 17
@@ -3927,49 +3945,71 @@ struct AIChatPanel: View {
     @Environment(\.colorScheme) var scheme
     var onClose: () -> Void
 
-    struct Msg: Identifiable { let id = UUID(); let role: String; let text: String }   // "you" / "ai"
-    @State private var msgs: [Msg] = []
     @State private var input = ""
     @State private var thinking = false
     @State private var proposalRange: NSRange?
     @State private var proposalText = ""
 
+    private let brand = "You are the writing assistant built into Penwick, a native Mac app for writing books and screenplays. The user is working on their manuscript. Be warm, concise, and practical — help with prose, brainstorming, structure, and names."
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Circle().fill(LinearGradient(colors: [Palette.accent(), Palette.accentDark()], startPoint: .top, endPoint: .bottom))
-                    .frame(width: 22, height: 22)
-                    .overlay(Image(systemName: "sparkles").font(.system(size: 11)).foregroundStyle(.white))
-                Text("AI assistant").font(.system(size: 13, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .overlay(Image(systemName: "sparkles").font(.system(size: 12)).foregroundStyle(.white))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Penwick AI").font(.system(size: 13, weight: .semibold))
+                    Text(AIClient.isConfigured ? "\(AIClient.provider.shortName) · \(AIClient.model)" : "Not linked")
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                }
                 Spacer()
+                if !editor.aiMessages.isEmpty {
+                    Button { editor.aiMessages.removeAll() } label: { Image(systemName: "trash").font(.system(size: 12)).foregroundStyle(.secondary) }
+                        .buttonStyle(.plain).help("Clear chat")
+                }
                 Button { onClose() } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 14)).foregroundStyle(.secondary) }.buttonStyle(.plain)
             }
             .padding(12)
             Divider()
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        if msgs.isEmpty {
-                            Text("Ask me anything — or select text in your page and tell me how to change it. I'll show the edit for you to approve.")
-                                .font(.system(size: 12)).foregroundStyle(.secondary).padding(.vertical, 6)
+            if !AIClient.isConfigured {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "sparkles").font(.system(size: 30)).foregroundStyle(Palette.accent())
+                    Text("Link an AI to get started").font(.system(size: 14, weight: .medium))
+                    Text("Use a free local model with Ollama, or your own Claude / ChatGPT key.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Button("Open AI settings") { NotificationCenter.default.post(name: .openPenwickSettings, object: nil) }
+                        .buttonStyle(.borderedProminent).tint(Palette.accent())
+                    Spacer()
+                }.padding(.horizontal, 24)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            if editor.aiMessages.isEmpty {
+                                Text("Ask me anything — or select text in your page and tell me how to change it. I'll show the edit for you to approve, and keep your font.")
+                                    .font(.system(size: 12)).foregroundStyle(.secondary).padding(.vertical, 6)
+                            }
+                            ForEach(editor.aiMessages) { m in bubble(m) }
+                            if thinking { HStack(spacing: 6) { ProgressView().scaleEffect(0.5); Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary) } }
+                            if let r = proposalRange { proposalCard(r) }
+                            Color.clear.frame(height: 1).id("end")
                         }
-                        ForEach(msgs) { m in bubble(m) }
-                        if thinking { Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary).id("end") }
-                        if let r = proposalRange { proposalCard(r) }
-                        Color.clear.frame(height: 1).id("end")
+                        .padding(12)
                     }
-                    .padding(12)
+                    .onChange(of: editor.aiMessages.count) { _, _ in withAnimation { proxy.scrollTo("end") } }
+                    .onChange(of: thinking) { _, _ in withAnimation { proxy.scrollTo("end") } }
                 }
-                .onChange(of: msgs.count) { _, _ in withAnimation { proxy.scrollTo("end") } }
             }
 
             Divider()
             HStack(spacing: 8) {
                 TextField("Message…", text: $input, axis: .vertical).textFieldStyle(.plain).lineLimit(1...4)
-                    .onSubmit(send)
+                    .onSubmit(send).disabled(!AIClient.isConfigured)
                 Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).foregroundStyle(Palette.accent()) }
-                    .buttonStyle(.plain).disabled(thinking || input.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .buttonStyle(.plain).disabled(thinking || !AIClient.isConfigured || input.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(10)
         }
@@ -3979,7 +4019,7 @@ struct AIChatPanel: View {
         .shadow(color: .black.opacity(0.28), radius: 24, y: 10)
     }
 
-    private func bubble(_ m: Msg) -> some View {
+    private func bubble(_ m: AIMessage) -> some View {
         HStack {
             if m.role == "you" { Spacer(minLength: 30) }
             Text(m.text).font(.system(size: 13)).textSelection(.enabled)
@@ -3996,9 +4036,9 @@ struct AIChatPanel: View {
             Text("PROPOSED EDIT").font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(.secondary)
             Text(proposalText).font(.system(size: 13)).foregroundStyle(.primary)
             HStack {
-                Button("Approve") { editor.applyEdit(range: range, text: proposalText); msgs.append(Msg(role: "ai", text: "Applied — your font is kept.")); proposalRange = nil }
+                Button("Approve") { editor.applyEdit(range: range, text: proposalText); editor.aiMessages.append(AIMessage(role: "ai", text: "Applied — your font is kept.")); proposalRange = nil }
                     .buttonStyle(.borderedProminent).controlSize(.small).tint(Palette.accent())
-                Button("Discard") { proposalRange = nil; msgs.append(Msg(role: "ai", text: "Discarded.")) }
+                Button("Discard") { proposalRange = nil; editor.aiMessages.append(AIMessage(role: "ai", text: "Discarded.")) }
                     .buttonStyle(.bordered).controlSize(.small)
             }
         }
@@ -4009,33 +4049,30 @@ struct AIChatPanel: View {
 
     private func send() {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !thinking else { return }
-        guard AIClient.isConfigured else { msgs.append(Msg(role: "ai", text: "Link an AI first in Settings → AI.")); input = ""; return }
+        guard !text.isEmpty, !thinking, AIClient.isConfigured else { return }
         input = ""
         let tv = editor.textView
         let sel = tv?.selectedRange() ?? NSRange(location: 0, length: 0)
         let selText = (sel.length > 0 && tv != nil) ? (tv!.string as NSString).substring(with: sel) : ""
-        msgs.append(Msg(role: "you", text: text))
+        editor.aiMessages.append(AIMessage(role: "you", text: text))
         thinking = true
-        let history = msgs.map { "\($0.role == "you" ? "User" : "Assistant"): \($0.text)" }.joined(separator: "\n")
+        let history = editor.aiMessages.map { "\($0.role == "you" ? "User" : "Assistant"): \($0.text)" }.joined(separator: "\n")
         Task {
             do {
                 if !selText.isEmpty {
                     let reply = try await AIClient.complete(
-                        system: "You are an editor. Apply the instruction to the passage and return ONLY the revised passage — no preamble, no quotes, no markdown.",
+                        system: brand + " Apply the user's instruction to the passage and return ONLY the revised passage — no preamble, no quotes, no markdown.",
                         prompt: "Instruction: \(text)\n\nPassage:\n\(selText)")
                     await MainActor.run {
                         proposalText = reply.trimmingCharacters(in: .whitespacesAndNewlines); proposalRange = sel
-                        msgs.append(Msg(role: "ai", text: "Here's a revision — approve to apply it to your selection.")); thinking = false
+                        editor.aiMessages.append(AIMessage(role: "ai", text: "Here's a revision — approve to apply it to your selection.")); thinking = false
                     }
                 } else {
-                    let reply = try await AIClient.complete(
-                        system: "You are a helpful, concise writing assistant inside a writing app.",
-                        prompt: history + "\nAssistant:")
-                    await MainActor.run { msgs.append(Msg(role: "ai", text: reply.trimmingCharacters(in: .whitespacesAndNewlines))); thinking = false }
+                    let reply = try await AIClient.complete(system: brand, prompt: history + "\nAssistant:")
+                    await MainActor.run { editor.aiMessages.append(AIMessage(role: "ai", text: reply.trimmingCharacters(in: .whitespacesAndNewlines))); thinking = false }
                 }
             } catch {
-                await MainActor.run { msgs.append(Msg(role: "ai", text: "Error: \(error.localizedDescription)")); thinking = false }
+                await MainActor.run { editor.aiMessages.append(AIMessage(role: "ai", text: "Error: \(error.localizedDescription)")); thinking = false }
             }
         }
     }
