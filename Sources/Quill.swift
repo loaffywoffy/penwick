@@ -2203,7 +2203,7 @@ final class EditorController: ObservableObject {
 
 // A single page's text view. Paste matches surrounding style; gaining focus makes
 // it the controller's active text view (all pages share one text storage).
-final class PageTextView: NSTextView {
+final class PageTextView: NSTextView, NSPopoverDelegate {
     weak var controller: EditorController?
     override func paste(_ sender: Any?) {
         if (textStorage?.length ?? 0) == 0 { super.paste(sender) } else { pasteAsPlainText(sender) }
@@ -2273,10 +2273,16 @@ final class PageTextView: NSTextView {
         if t >= 1 { cancelHold(); showDetail() }
     }
     private func cancelHold() {
+        let wasRunning = holdTimer != nil
         holdTimer?.invalidate(); holdTimer = nil
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        holdBar?.frame.size.width = 0
-        CATransaction.commit()
+        guard let bar = holdBar else { return }
+        if wasRunning {   // released mid-hold → smoothly retract the bar
+            CATransaction.begin(); CATransaction.setAnimationDuration(0.22)
+            bar.frame.size.width = 0
+            CATransaction.commit()
+        } else {
+            CATransaction.begin(); CATransaction.setDisableActions(true); bar.frame.size.width = 0; CATransaction.commit()
+        }
     }
 
     private func commentAt(_ pt: NSPoint) -> (comment: Comment, rect: NSRect)? {
@@ -2329,11 +2335,13 @@ final class PageTextView: NSTextView {
         guard detailPopover == nil, let c = hoverComment, let store = commentStore, let url = commentURL else { return }
         let rect = hoverRect
         hideBubble(); stopFlagsMonitor(); hoverComment = nil
-        let pop = NSPopover(); pop.behavior = .transient
-        pop.contentViewController = NSHostingController(rootView: CommentDetailView(store: store, url: url, commentId: c.id, onClose: { [weak self] in self?.detailPopover?.performClose(nil); self?.detailPopover = nil }))
+        let pop = NSPopover(); pop.behavior = .transient; pop.delegate = self
+        pop.contentViewController = NSHostingController(rootView: CommentDetailView(store: store, url: url, commentId: c.id, onClose: { [weak self] in self?.detailPopover?.performClose(nil) }))
         pop.show(relativeTo: rect, of: self, preferredEdge: .maxY)
         detailPopover = pop
     }
+    // Reset when the popover closes (incl. click-outside) so ⌘-hold works again next time.
+    func popoverDidClose(_ notification: Notification) { detailPopover = nil }
     deinit { if let m = flagsMonitor { NSEvent.removeMonitor(m) } }
 
     // Click a checklist box (☐ / ☑) to tick it off.
